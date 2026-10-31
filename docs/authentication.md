@@ -77,6 +77,32 @@ Local servers need no key at all:
 daemon auth add --provider ollama
 ```
 
+For Ollama Cloud's direct API (`https://ollama.com/v1`), create a key at
+<https://ollama.com/settings/keys>, then add the cloud provider:
+
+```powershell
+daemon auth add --provider ollama-cloud
+```
+
+Daemon prompts for the API key without displaying it and stores it in the
+configured credential vault (Windows Credential Manager when available).
+Then run `daemon launch`, choose `ollama-cloud`, and select one of the
+discovered models. Ollama's `ollama signin` signs in the Ollama desktop/CLI;
+it does not configure this direct API profile.
+
+If you prefer an environment variable, set `$env:OLLAMA_API_KEY` in
+PowerShell and run `daemon auth add --provider ollama-cloud --env OLLAMA_API_KEY`.
+This profile references the environment variable rather than saving a copy of
+the key, so it must be set in each new terminal session.
+
+To replace a saved `ollama-cloud` profile, remove that profile first and
+re-add it with the new key:
+
+```powershell
+daemon auth remove ollama-cloud
+daemon auth add --provider ollama-cloud
+```
+
 ## Secret storage
 
 Backend ladder (first available wins; force with

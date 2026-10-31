@@ -21,11 +21,13 @@ sudo pacman -S python git
 ```bash
 git clone https://github.com/adnqcr7-code/daemon-cli-agent.git daemon
 cd daemon
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install .
-daemon version
+./scripts/install.sh
 ```
+
+The installer installs for your user under `~/.local/share/daemon` and links
+the `daemon` command into `~/.local/bin`. Ensure `~/.local/bin` is on your
+PATH (the installer prints a hint if it is not), then open a new terminal.
+Run `daemon launch` from any project directory.
 
 ## Secret storage on Linux
 

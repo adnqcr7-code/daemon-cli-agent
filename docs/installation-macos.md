@@ -13,19 +13,23 @@ brew install python@3.12 git
 ```bash
 git clone https://github.com/adnqcr7-code/daemon-cli-agent.git daemon
 cd daemon
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install .
-daemon version
+./scripts/install.sh
 ```
 
-## Secret storage on macOS
+The installer creates a per-user installation under
+`~/.local/share/daemon` and links the command into `~/.local/bin`. Ensure
+`~/.local/bin` is on your `PATH` (the installer prints a hint if it is not),
+then open a new terminal. After installation, `daemon launch` works from any
+project directory.
 
-With the `keyring` extra installed, credentials are stored in the
-**macOS Keychain** (service name `daemon`):
+## Secret storage
 
-```bash
-pip install 'daemon-agent[keyring]'
+The installer includes the `keyring` extra, so credentials are stored in the
+**macOS Keychain** (service name `daemon`). Add a provider and launch:
+
+```sh
+daemon auth add
+daemon launch
 ```
 
 Grant `daemon` (the terminal host application) access to the keychain item
@@ -34,6 +38,7 @@ when prompted. Without keyring or cryptography, Daemon falls back to a
 
 ## Verify
 
-```bash
+```sh
+daemon version
 daemon doctor
 ```

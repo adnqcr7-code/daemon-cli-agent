@@ -28,24 +28,19 @@ Set-Location $HOME\Downloads
 git clone https://github.com/adnqcr7-code/daemon-cli-agent.git daemon
 Set-Location .\daemon
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
-.\.venv\Scripts\daemon.exe version
 ```
 
-For interactive use, activate the environment once in each new PowerShell
-window:
+The installer installs Daemon in `%LOCALAPPDATA%\Programs\Daemon` and adds
+its Scripts directory to your **user PATH**. Close this PowerShell window,
+open a new one, then verify:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
 daemon version
+daemon doctor
 ```
 
-Without activation, always call `.\.venv\Scripts\daemon.exe` explicitly.
-
-If scripts are blocked by execution policy:
-
-```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
+You can run it without restarting the shell using:
+`& "$env:LOCALAPPDATA\Programs\Daemon\Scripts\daemon.exe" version`.
 
 The installer includes the recommended `keyring`, `crypto` and `repl` extras.
 The `keyring` extra uses **Windows Credential Manager** — the best secret
@@ -56,32 +51,34 @@ manual installation, run:
 python -m pip install "daemon-agent[keyring,crypto,repl]"
 ```
 
-## 4. Verify
+## 3. Verify
 
 ```powershell
-.\.venv\Scripts\daemon.exe doctor
+daemon doctor
 ```
 
 Expected on a healthy machine: Python 3.11+, `pwsh` or `powershell`
 detected, credential storage = *os-keychain* (with the keyring extra),
 git present.
 
-## 3. First Ollama run
+## 4. Connect a provider and launch
 
 ```powershell
-Set-Location $HOME\Downloads\daemon
-.\.venv\Scripts\Activate.ps1
-daemon auth add --provider ollama
+daemon auth add --provider ollama-cloud
 daemon launch
 ```
 
-If `auth add` reports that the Ollama profile already exists, continue with
-`daemon launch`. The launcher lets you choose a saved provider and model for
-this session without changing profile or model defaults. For persistent
-defaults used by `daemon run`, configure `default`, `build`, and `coding`
-separately; `daemon config set models.build <id>` works across versions.
+At the hidden prompt, paste the Ollama Cloud API key you created at
+<https://ollama.com/settings/keys>. Daemon stores it in Windows Credential
+Manager when available. Choose the `ollama-cloud` profile and a listed model
+in the launch menus.
 
-Run `daemon launch` any time to choose a saved provider and model from menus.
+For local Ollama instead, use `daemon auth add --provider ollama`. For other
+providers, use `daemon auth add` and follow the provider/key prompts. If a
+profile already exists, skip adding it and run `daemon launch`.
+
+Once installed and added to PATH, `daemon launch` works from any directory.
+The current directory is the project Daemon will work in.
 
 ## Notes
 

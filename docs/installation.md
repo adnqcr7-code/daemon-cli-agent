@@ -16,20 +16,23 @@ cd daemon
 ./scripts/install.sh
 ```
 
-The installer locates the repository from its own script path, so it is safe
-to launch it from another working directory. On Windows, use
-`powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1` instead.
+The installer creates a per-user installation. On Windows it adds Daemon to
+the user PATH; open a new PowerShell window after installing. On Linux and
+macOS, it installs under `~/.local/share/daemon` and links the command into
+`~/.local/bin` (add that directory to PATH if needed). The script locates
+the source repository relative to itself. On Windows, run
+`powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1`.
 
 Verify the installation with:
 
 ```bash
-./.venv/bin/daemon version
+daemon version
 ```
 
 For development (tests included):
 
 ```bash
-pip install -e .[dev]
+python -m pip install -e '.[dev]'
 python -m pytest
 ```
 
@@ -51,8 +54,8 @@ to encrypted storage to a 0600-permission file (with a loud warning from
 
 ```bash
 daemon doctor        # verify the installation
-daemon auth add      # paste an API key (see docs/authentication.md)
-daemon               # start the interactive agent
+daemon auth add      # add a provider/key; see docs/authentication.md
+daemon launch        # choose a saved provider and model
 ```
 
 State lives in `~/.daemon/` (override with the `DAEMON_HOME` environment
@@ -76,7 +79,10 @@ incremental project index.
 
 ## Updating
 
-Re-run `pip install .` (or `pip install -e .`) from a fresh checkout.
+Re-run the installer from a fresh checkout (`./scripts/install.sh` on Linux
+and macOS, or `powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1`
+on Windows). For a development checkout, use
+`python -m pip install -e '.[dev]'` instead.
 User state in `~/.daemon` is forward-compatible across 0.x releases;
 `daemon doctor` after upgrading will flag anything unusual.
 

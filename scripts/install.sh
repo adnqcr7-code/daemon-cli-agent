@@ -4,7 +4,8 @@ set -eu
 echo "Installing Daemon..."
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-cd "$SCRIPT_DIR/.."
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+cd "$REPO_ROOT"
 
 if command -v python3 >/dev/null 2>&1; then
     PYTHON=python3
@@ -15,20 +16,28 @@ else
     exit 1
 fi
 
-if [ ! -d .venv ]; then
-    "$PYTHON" -m venv .venv
+INSTALL_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/daemon"
+VENV_PYTHON="$INSTALL_ROOT/bin/python"
+if [ ! -x "$VENV_PYTHON" ]; then
+    mkdir -p "$INSTALL_ROOT"
+    "$PYTHON" -m venv "$INSTALL_ROOT"
 fi
 
-VENV_PYTHON=".venv/bin/python"
 "$VENV_PYTHON" -m pip install --upgrade pip
-"$VENV_PYTHON" -m pip install -e '.[keyring,crypto,repl]'
+"$VENV_PYTHON" -m pip install '.[keyring,crypto,repl]'
+
+mkdir -p "$HOME/.local/bin"
+ln -sf "$INSTALL_ROOT/bin/daemon" "$HOME/.local/bin/daemon"
 
 echo
 echo "Daemon is installed."
-echo "Run it with:"
-echo "  ./.venv/bin/daemon auth add"
-echo "  ./.venv/bin/daemon"
+echo "Installed for your user at: $INSTALL_ROOT"
+echo "Run it from any project folder with:"
+echo "  $HOME/.local/bin/daemon launch"
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) echo "Add \$HOME/.local/bin to your PATH to run 'daemon' without its full path." ;;
+esac
 echo
-echo "If Ollama is installed, use:"
-echo "  ./.venv/bin/daemon auth add --provider ollama"
-echo "  ./.venv/bin/daemon models list"
+echo "To enter an Ollama Cloud API key securely:"
+echo "  daemon auth add --provider ollama-cloud"
