@@ -23,7 +23,7 @@ demonstrations** — a merged feature is a tested feature.
 ## Development setup
 
 ```bash
-git clone <repository> && cd daemon
+git clone https://github.com/adnqcr7-code/daemon-cli-agent.git daemon && cd daemon
 python -m venv .venv && source .venv/bin/activate
 pip install -e .[dev,keyring,crypto,repl]
 python -m pytest            # 227 tests should pass

@@ -19,7 +19,7 @@ sudo pacman -S python git
 ## Install
 
 ```bash
-git clone <repository> daemon
+git clone https://github.com/adnqcr7-code/daemon-cli-agent.git daemon
 cd daemon
 python3.12 -m venv .venv
 source .venv/bin/activate

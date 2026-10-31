@@ -21,7 +21,7 @@ python --version
 ## 2. Install Daemon
 
 ```powershell
-git clone <repository> daemon
+git clone https://github.com/adnqcr7-code/daemon-cli-agent.git daemon
 cd daemon
 .\scripts\install.ps1
 .\.venv\Scripts\daemon.exe version
