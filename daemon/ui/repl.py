@@ -52,6 +52,7 @@ SLASH_COMMANDS = {
     "/memory": "search memory: /memory [query]",
     "/remember": "store a decision: /remember <text>",
     "/stats": "usage and cost for this session",
+    "/tokens": "show context window token usage",
     "/theme": "switch theme: /theme [name]",
     "/session": "session info",
     "/save": "save the session now",
@@ -195,6 +196,8 @@ class Repl:
                     "muted", "changed: " + ", ".join(result.files_changed[:8]) +
                              (f" (+{len(result.files_changed) - 8})" if
                               len(result.files_changed) > 8 else ""))
+            # Show token counter after each turn
+            self._show_token_counter()
         except DaemonError:
             raise
 
@@ -211,6 +214,14 @@ class Repl:
         self.renderer.line("error", str(exc))
         if getattr(exc, "hint", None):
             self.renderer.line("muted", f"hint: {exc.hint}")
+
+    def _show_token_counter(self) -> None:
+        """Display current context token usage."""
+        tokens = self.runtime.context_tokens()
+        window = self.ctx.model.capabilities.context_window
+        from daemon.agent.context import context_budget
+        budget = context_budget(window) if window else None
+        self.renderer.token_counter(tokens, budget, window)
 
     # ----------------------------------------------------------------- slash
 
@@ -521,6 +532,10 @@ class Repl:
             f"{session.usage.output_tokens:,} out · "
             + (f"cost ~${cost:.4f}" if cost is not None else "cost unknown "
               "(no pricing data for this model)"))
+        return False
+
+    def _cmd_tokens(self, rest: str) -> bool:
+        self._show_token_counter()
         return False
 
     # ------------------------------------------------------------------ misc

@@ -222,6 +222,19 @@ class Renderer(AgentUI):
                            f"{session.usage.input_tokens:,}/"
                            f"{session.usage.output_tokens:,} tokens")
 
+    def token_counter(self, tokens: int, budget: int | None, window: int | None) -> None:
+        """Display token counter with context window usage."""
+        if budget and budget > 0:
+            pct = tokens / budget * 100
+            bar_len = 20
+            filled = int(bar_len * pct / 100)
+            bar = "█" * filled + "░" * (bar_len - filled)
+            self.line("usage", f"context: {tokens:,}/{budget:,} ({pct:.0f}%) [{bar}]")
+        elif window:
+            self.line("usage", f"context: {tokens:,} tokens (window: {window:,})")
+        else:
+            self.line("usage", f"context: {tokens:,} tokens")
+
 
 def _fmt_ctx(value: int | None) -> str:
     if value is None:

@@ -88,6 +88,33 @@ DEFAULTS: dict[str, Any] = {
     "sessions": {
         "keep": 50,
     },
+    "optimization": {
+        "enabled": True,
+        "context": {
+            "enabled": True,
+            "preserve_recent_turns": 4,
+            "dedupe_tool_results": True,
+            "summarize_old_turns": True,
+            "max_summary_length": 2000,
+        },
+        "tools": {
+            "enabled": False,
+            "min_score": 0.15,
+            "max_tools": 20,
+        },
+        "failure_detection": {
+            "enabled": False,
+            "max_failures": 3,
+            "window_turns": 10,
+        },
+        "memory": {
+            "verified_facts_in_prompt": False,
+            "max_verified_facts": 10,
+        },
+        "reporting": {
+            "enabled": False,
+        },
+    },
 }
 
 # Environment overrides: env var name -> config path.

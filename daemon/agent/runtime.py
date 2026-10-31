@@ -29,6 +29,7 @@ from ..providers.types import (
 from ..security import scan_injection
 from ..tools import ToolContext, ToolOutput, ToolRegistry
 from .context import should_compact, compact_conversation, truncate_tool_output
+from .optimizer import ContextOptimizer, ContextOptimizationStats
 from .prompts import build_system_prompt
 from .session import Session
 
@@ -120,6 +121,10 @@ class AgentRuntime:
         session.meta.provider = model.provider
         session.meta.workspace = str(self.workspace)
 
+        # Optimization engine
+        self.optimizer = ContextOptimizer(config) if config and config.get("optimization.enabled") else None
+        self._optimization_enabled = config.get("optimization.enabled", True) if config else True
+
     # ------------------------------------------------------------------ run
 
     async def run(self, user_text: str) -> RunResult:
@@ -131,6 +136,23 @@ class AgentRuntime:
             for step in range(1, max_turns + 1):
                 result.steps = step
                 await self._maybe_compact()
+                if self.optimizer and self._optimization_enabled:
+                    tools = [tool for tool in self.registry.tools()
+                             if tool.spec()["parameters"] is not None]
+                    from ..providers.types import ToolSpec
+                    tool_specs = [ToolSpec(**spec) for spec in self.registry.specs()]
+                    self.session.messages, opt_stats = await self.optimizer.optimize(
+                        self.session.messages,
+                        tool_specs,
+                        self.model.capabilities.context_window,
+                        adapter=self.adapter,
+                        model_id=self.model.model_id,
+                    )
+                    if opt_stats.tokens_saved > 0:
+                        await self.ui.notice(
+                            f"Context optimized: saved ~{opt_stats.tokens_saved} tokens "
+                            f"({opt_stats.original_tokens} -> {opt_stats.optimized_tokens})",
+                            level="debug")
                 text, calls, usage = await self._stream_once()
                 if usage is not None:
                     self.session.add_usage(usage)
@@ -309,6 +331,11 @@ class AgentRuntime:
     # ----------------------------------------------------------- compaction
 
     async def _maybe_compact(self) -> None:
+        """Compact if needed, but skip if optimizer already summarized."""
+        # Skip if optimizer recently summarized (session.meta.compacted tracks this)
+        if self.session.meta.compacted:
+            self.session.meta.compacted = False  # reset for next check
+            return
         specs = self.registry.specs()
         from ..providers.types import ToolSpec
 
@@ -339,6 +366,25 @@ class AgentRuntime:
         """Cumulative cost estimate for this session (None when pricing is
         unknown for the model)."""
         return self._cost_total()
+
+    def context_tokens(self) -> int:
+        """Current estimated tokens in the conversation context."""
+        from .context import conversation_tokens
+        from ..providers.types import ToolSpec
+        specs = self.registry.specs()
+        tools = [ToolSpec(**spec) for spec in specs]
+        return conversation_tokens(self.session.messages, tools)
+
+    def context_usage_pct(self) -> float | None:
+        """Context usage as percentage of budget (0-1). None if unknown window."""
+        window = self.model.capabilities.context_window
+        if not window:
+            return None
+        from .context import context_budget
+        budget = context_budget(window)
+        if budget <= 0:
+            return None
+        return self.context_tokens() / budget
 
     def _cost_total(self) -> float | None:
         return round(self._cumulative_cost, 4) if self._cumulative_cost else None
