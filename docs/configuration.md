@@ -21,8 +21,12 @@ daemon config get ui.theme
 daemon config set ui.theme archive
 daemon config set limits.max_turns 30
 daemon config set models.coding gpt-4o --project      # writes project file
+daemon config set active_profile ollama                # switch an auth profile
 daemon config list
 ```
+
+`active_profile` is a convenience alias for `daemon auth switch`; it updates
+the credential store rather than writing an unrelated configuration key.
 
 ## Reference (defaults shown)
 

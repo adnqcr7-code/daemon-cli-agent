@@ -111,6 +111,8 @@ def build_context(
     model_id: str | None = None,
     role: str = "build",
     require_auth: bool = True,
+    select_model: bool = True,
+    refresh_models: bool = False,
 ) -> DaemonContext:
     """Assemble providers, models, tools, permissions and session state."""
     workspace = (Path(workspace) if workspace else Path.cwd()).resolve()
@@ -160,13 +162,14 @@ def build_context(
             model_registry = ModelRegistry(home)
             try:
                 ctx.models = asyncio.run(model_registry.load_async(
-                    ctx.adapter, profile.id))
+                    ctx.adapter, profile.id, refresh=refresh_models))
             finally:
                 asyncio.run(ctx.adapter.close())  # clients bind to loops
             _logger.info("loaded %d models for profile %s",
                          len(ctx.models), profile.id)
-            preferred = model_id or profile.default_model
-            ctx.model = _select_model(ctx.models, preferred, role, config)
+            if select_model:
+                preferred = model_id or profile.default_model
+                ctx.model = _select_model(ctx.models, preferred, role, config)
         elif require_auth:
             raise AuthError("The active profile has no usable credential.")
 
