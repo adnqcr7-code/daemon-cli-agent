@@ -62,6 +62,13 @@ This is harmless; it means no new profile was created. To use the local
 Ollama profile rather than another active provider, run
 `daemon auth switch ollama` and then `daemon models list`.
 
+**Start Daemon with another provider/model**
+Run `daemon launch` to choose from the saved provider profiles and the models
+available on the selected profile. This choice applies to that session and
+does not change your saved active profile or model defaults. Use
+`daemon launch --profile ollama` to skip the provider menu, or
+`daemon launch --profile ollama --model gemma4:e4b` to skip both menus.
+
 **Cost shows "unknown"**
 The curated catalog has no pricing data for that model. Contributions
 welcome (see `daemon/models.py`).

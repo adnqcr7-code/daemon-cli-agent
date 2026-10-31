@@ -72,20 +72,16 @@ git present.
 Set-Location $HOME\Downloads\daemon
 .\.venv\Scripts\Activate.ps1
 daemon auth add --provider ollama
-daemon auth switch ollama
-daemon models list
-$model = Read-Host "Enter the exact model id shown above"
-daemon models set default $model
-daemon config set models.build $model
-daemon models set coding $model
-daemon
+daemon launch
 ```
 
-The `build` role matters because `daemon run` uses it by default. Configure it
-alongside `default` and `coding` to avoid a stale or missing build-model
-error. `daemon config set models.build <id>` also works with releases where
-`daemon models set build` is not available. If adding the Ollama profile says
-it already exists, continue with `daemon auth switch ollama`.
+If `auth add` reports that the Ollama profile already exists, continue with
+`daemon launch`. The launcher lets you choose a saved provider and model for
+this session without changing profile or model defaults. For persistent
+defaults used by `daemon run`, configure `default`, `build`, and `coding`
+separately; `daemon config set models.build <id>` works across versions.
+
+Run `daemon launch` any time to choose a saved provider and model from menus.
 
 ## Notes
 

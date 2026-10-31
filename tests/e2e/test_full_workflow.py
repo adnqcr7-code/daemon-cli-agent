@@ -71,7 +71,7 @@ def test_version_and_help(runner):
     assert "daemon 0.1.0" in result.output
     result = _invoke(runner, "--help")
     for command in ("auth", "models", "run", "plan", "review", "research",
-                    "tools", "mcp", "agents", "sessions", "memory", "config",
+                    "launch", "tools", "mcp", "agents", "sessions", "memory", "config",
                     "doctor", "init"):
         assert command in result.output
 
@@ -92,6 +92,34 @@ def test_config_active_profile_switches_auth_profile(runner):
     assert "Active profile: ollama#second" in result.output
     result = _invoke(runner, "auth", "list")
     assert "* ollama#second" in result.output
+
+
+def test_launch_prompts_for_saved_profile_and_model(runner, mock_openai,
+                                                    config, scripted_io,
+                                                    workspace, monkeypatch):
+    from daemon.auth.manager import AuthManager
+    from daemon.ui.repl import Repl
+
+    manager = AuthManager(config)
+    manager.add(scripted_io, key=API_KEY,
+                base_url=mock_openai.url + "/v1")
+    manager.close()
+
+    launched = {}
+    monkeypatch.setattr(
+        Repl, "start",
+        lambda self: launched.update(
+            profile=self.ctx.auth.store.active().id,
+            model=self.ctx.model.model_id,
+            provider=self.ctx.model.provider))
+    result = runner.invoke(cli_main, ["launch", "-w", str(workspace)],
+                           input="1\n1\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Available provider profiles:" in result.output
+    assert "Available models:" in result.output
+    assert launched == {"profile": "custom", "model": "mock-coder",
+                        "provider": "custom"}
 
 
 def test_full_workflow(runner, mock, encrypted_home, workspace):

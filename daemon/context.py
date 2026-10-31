@@ -113,6 +113,7 @@ def build_context(
     require_auth: bool = True,
     select_model: bool = True,
     refresh_models: bool = False,
+    profile_id: str | None = None,
 ) -> DaemonContext:
     """Assemble providers, models, tools, permissions and session state."""
     workspace = (Path(workspace) if workspace else Path.cwd()).resolve()
@@ -143,7 +144,13 @@ def build_context(
     ctx.auth = auth
 
     if auth is not None:
-        profile = auth.store.active()
+        if profile_id:
+            profile = auth.store.get(profile_id)
+            if profile is None:
+                raise AuthError(
+                    f"No profile '{profile_id}'. See: daemon auth list")
+        else:
+            profile = auth.store.active()
         if profile is None and require_auth:
             raise AuthError(
                 "No provider credentials configured. Run 'daemon auth add' "

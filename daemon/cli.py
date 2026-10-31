@@ -118,20 +118,68 @@ def main(ctx: click.Context, workspace: Path | None, model: str | None,
 
 def _launch_repl(*, workspace: Path | None, model: str | None, theme: str | None,
                  session_id: str | None, plain: bool,
-                 research: bool = False) -> None:
+                 research: bool = False, profile_id: str | None = None,
+                 choose_profile: bool = False,
+                 choose_model: bool = False) -> None:
     from .context import build_context
     from .ui.repl import Repl, run_research_repl
 
     try:
         config = Config.load(workspace or Path.cwd())
         renderer = _make_renderer(config, plain=plain, theme=theme)
+        if choose_profile and profile_id is None:
+            from .auth.manager import AuthManager
+
+            manager = AuthManager(config)
+            try:
+                profiles = manager.store.profiles()
+                active = manager.store.active()
+            finally:
+                manager.close()
+            if not profiles:
+                _fail(AuthError(
+                    "No provider profiles configured. Run 'daemon auth add' first."))
+            click.echo("Available provider profiles:")
+            active_index = 1
+            for index, profile in enumerate(profiles, start=1):
+                marker = " (active)" if active and profile.id == active.id else ""
+                click.echo(f"  {index}. {profile.id}{marker}")
+                if active and profile.id == active.id:
+                    active_index = index
+            profile_choice = click.prompt(
+                "Choose a profile", type=click.IntRange(1, len(profiles)),
+                default=active_index)
+            profile_id = profiles[profile_choice - 1].id
+
         ctx = build_context(workspace=workspace, config=config,
                             renderer=renderer, interactive=True,
                             session_id=session_id, model_id=model,
-                            role="research" if research else "build")
+                            role="research" if research else "build",
+                            profile_id=profile_id,
+                            select_model=not choose_model)
     except DaemonError as exc:
         _fail(exc)
     try:
+        if choose_model:
+            if not ctx.models:
+                raise DaemonError(
+                    "No models are available on the selected profile. "
+                    "Check the provider connection with 'daemon auth test'.")
+            click.echo("Available models:")
+            configured = model or config.get("models.build") or \
+                config.get("default_model")
+            model_index = next(
+                (index for index, item in enumerate(ctx.models, start=1)
+                 if item.model_id == configured), 1)
+            for index, item in enumerate(ctx.models, start=1):
+                marker = " (configured)" if item.model_id == configured else ""
+                click.echo(f"  {index}. {item.model_id}{marker}")
+            model_choice = click.prompt(
+                "Choose a model", type=click.IntRange(1, len(ctx.models)),
+                default=model_index)
+            ctx.model = ctx.models[model_choice - 1]
+            ctx.session.meta.provider = ctx.model.provider
+            ctx.session.meta.model = ctx.model.model_id
         if research:
             run_research_repl(ctx, renderer)
         else:
@@ -143,6 +191,25 @@ def _launch_repl(*, workspace: Path | None, model: str | None, theme: str | None
             ctx.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+@main.command("launch")
+@click.option("--profile", "profile_id", default=None,
+              help="Use this saved provider profile without prompting")
+@click.option("--model", "-m", default=None,
+              help="Use this model id without prompting")
+@click.option("--workspace", "-w", type=click.Path(exists=True,
+                                                   file_okay=False,
+                                                   path_type=Path), default=None)
+@click.option("--theme", default=None, help="Terminal theme")
+@click.option("--plain", is_flag=True, help="Plain (uncoloured) output")
+def launch(profile_id: str | None, model: str | None, workspace: Path | None,
+           theme: str | None, plain: bool) -> None:
+    """Choose a provider and model, then launch the interactive agent."""
+    _launch_repl(workspace=workspace, model=model, theme=theme,
+                 session_id=None, plain=plain, profile_id=profile_id,
+                 choose_profile=profile_id is None,
+                 choose_model=model is None)
 
 
 # ---------------------------------------------------------------------------

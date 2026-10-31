@@ -71,17 +71,16 @@ Set-Location .\daemon
 # 2. Install Daemon (the script also works when called from another folder)
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 
-# 3. Connect Ollama, choose a model, configure every agent role, and start
+# 3. Connect Ollama if needed, then choose a provider and model to start
 .\.venv\Scripts\Activate.ps1
 daemon auth add --provider ollama
-daemon auth switch ollama
-daemon models list
-$model = Read-Host "Enter the exact model id shown above"
-daemon models set default $model
-daemon config set models.build $model
-daemon models set coding $model
-daemon
+daemon launch
 ```
+
+If `auth add` reports that the Ollama profile already exists, that is okay;
+continue with `daemon launch`. It presents menus for saved provider profiles
+and their available models, then starts the agent with that choice. It does
+not overwrite the saved active profile or model defaults.
 
 If `daemon` already exists, skip step 1 and run:
 
@@ -112,18 +111,15 @@ Install and start Ollama, then run:
 
 ```powershell
 .\.venv\Scripts\daemon.exe auth add --provider ollama
-.\.venv\Scripts\daemon.exe auth switch ollama
-.\.venv\Scripts\daemon.exe models list
-.\.venv\Scripts\daemon.exe
+.\.venv\Scripts\daemon.exe launch
 ```
 
 If `auth add` says the Ollama profile already exists, that is okay: continue
-with `auth switch ollama`. Adding a profile does not automatically make an
-already-existing profile active.
+with `daemon launch` and choose the existing Ollama profile in the menu.
 
-Choose the exact model id printed by `models list`, for example
-`gemma4:e4b`. Ollama model ids are exact: `gemma4:e4b` is not the same as
-`gemma4:cloud`. To select one:
+The launch menus display the exact model IDs available on the selected
+profile. Ollama model IDs are exact: `gemma4:e4b` is not the same as
+`gemma4:cloud`. To set a model permanently for `daemon` and `daemon run`:
 
 ```powershell
 .\.venv\Scripts\daemon.exe models set default gemma4:e4b
@@ -269,6 +265,7 @@ daemon plan "goal"         create an implementation plan (--execute to run it)
 daemon review              reviewer subagent over the current diff
 daemon research            the restricted Research agent (REPL or one-shot)
 daemon auth …              add / list / remove / test / switch / models
+daemon launch              choose a saved provider and model, then start
 daemon models …            list / recommend / set
 daemon mcp …               add / list / remove / test / enable / disable
 daemon tools               list every registered tool
