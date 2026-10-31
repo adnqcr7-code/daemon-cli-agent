@@ -23,10 +23,8 @@ python --version
 ```powershell
 git clone <repository> daemon
 cd daemon
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install .
-daemon version
+.\scripts\install.ps1
+.\.venv\Scripts\daemon.exe version
 ```
 
 If scripts are blocked by execution policy:
@@ -35,19 +33,19 @@ If scripts are blocked by execution policy:
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
-## 3. Recommended extras
+The installer includes the recommended `keyring`, `crypto` and `repl` extras.
+The `keyring` extra uses **Windows Credential Manager** — the best secret
+storage option on this platform and the default once installed. If you prefer
+manual installation, run:
 
 ```powershell
 python -m pip install "daemon-agent[keyring,crypto,repl]"
 ```
 
-The `keyring` extra uses **Windows Credential Manager** — the best secret
-storage option on this platform and the default once installed.
-
 ## 4. Verify
 
 ```powershell
-daemon doctor
+.\.venv\Scripts\daemon.exe doctor
 ```
 
 Expected on a healthy machine: Python 3.11+, `pwsh` or `powershell`

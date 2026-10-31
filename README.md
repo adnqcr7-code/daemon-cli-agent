@@ -49,35 +49,119 @@ changed: bug.py
 
 ## Quick start
 
-The easiest setup is **Ollama Cloud**: no model download and no powerful GPU
-needed. Daemon also works with local Ollama models if you want everything to
-stay on this computer.
+Daemon follows the same shape as OpenCode, OpenClaw and Hermes: install once,
+connect one model provider, then run `daemon` in the repository you want to
+change. You do not need to activate a virtual environment and you do not need
+to edit TOML by hand.
 
-### Windows: the 3-command setup
+### Windows (recommended)
 
-This is the recommended setup for a computer without a powerful GPU. It uses
-Ollama Cloud through the Ollama app, so you do not paste an API key into
-Daemon:
+From a PowerShell window in this repository:
 
 ```powershell
-# 1. Enter the project and install Daemon
-cd C:\path\to\daemon; if (!(Test-Path .venv)) { py -3.11 -m venv .venv }; .\.venv\Scripts\python.exe -m pip install -e ".[crypto]"
-
-# 2. Switch Ollama accounts, sign in, and configure Gemma 4
-ollama signout; ollama signin; .\.venv\Scripts\python.exe -m daemon.cli auth add --provider ollama; .\.venv\Scripts\python.exe -m daemon.cli config set default_model gemma4:cloud; .\.venv\Scripts\python.exe -m daemon.cli config set models.coding gemma4:cloud
-
-# 3. Run Daemon
-.\.venv\Scripts\python.exe -m daemon.cli run "Inspect this project and fix the failing tests." --model gemma4:cloud
+.\scripts\install.ps1
 ```
 
-The second command opens Ollama's sign-in flow. Complete it with the account
-you want to use. Cloud models require Ollama usage credits or a paid plan.
-`.\.venv\Scripts\python.exe` is used directly so PowerShell activation is not
-needed.
+If PowerShell blocks scripts, run it once with:
 
-For a fully local setup, replace `gemma4:cloud` with `gemma4:e2b`, run
-`ollama pull gemma4:e2b` once, and use `--provider ollama`. Local models need
-no account or API key but may be slow on computers with limited GPU memory.
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+The installer creates `.venv`, installs Daemon with secure credential storage
+and REPL history, and prints the exact command paths.
+
+### Use a local Ollama model
+
+Install and start Ollama, then run:
+
+```powershell
+.\.venv\Scripts\daemon.exe auth add --provider ollama
+.\.venv\Scripts\daemon.exe models list
+.\.venv\Scripts\daemon.exe
+```
+
+Choose the exact model id printed by `models list`, for example
+`gemma4:e4b`. Ollama model ids are exact: `gemma4:e4b` is not the same as
+`gemma4:cloud`. To select one:
+
+```powershell
+.\.venv\Scripts\daemon.exe models set default gemma4:e4b
+.\.venv\Scripts\daemon.exe models set coding gemma4:e4b
+.\.venv\Scripts\daemon.exe run "Inspect this project and fix the failing tests."
+```
+
+For a model that is not installed yet:
+
+```powershell
+ollama pull gemma4:e4b
+```
+
+### Use Ollama Cloud
+
+There are two Ollama cloud paths. If the Ollama desktop app exposes a
+`*-cloud` model in `ollama list`, use the local `ollama` profile:
+
+```powershell
+ollama signin
+.\.venv\Scripts\daemon.exe auth add --provider ollama
+.\.venv\Scripts\daemon.exe models list
+```
+
+For direct access to `https://ollama.com/v1`, create an Ollama API key at
+<https://ollama.com/settings/keys>, set it in the current PowerShell session,
+and use the `ollama-cloud` profile:
+
+```powershell
+$env:OLLAMA_API_KEY = "paste-your-key-here"
+.\.venv\Scripts\daemon.exe auth add --provider ollama-cloud --env OLLAMA_API_KEY
+.\.venv\Scripts\daemon.exe auth models ollama-cloud
+```
+
+`ollama signin` signs the Ollama CLI into the Ollama app; it does not create
+the `OLLAMA_API_KEY` environment variable needed by the direct cloud profile.
+Do not guess a cloud model name. Copy the exact id from `daemon models list`
+or `daemon auth models ollama-cloud` and set it with
+`daemon models set default <id>`.
+
+### Use another provider
+
+Daemon can identify many API keys automatically:
+
+```powershell
+.\.venv\Scripts\daemon.exe auth add
+.\.venv\Scripts\daemon.exe auth list
+.\.venv\Scripts\daemon.exe models list
+.\.venv\Scripts\daemon.exe
+```
+
+The key prompt is hidden. Keys are stored in the OS credential manager when
+the `keyring` extra is available, otherwise in Daemon's encrypted vault.
+
+### Linux and macOS
+
+```bash
+./scripts/install.sh
+./.venv/bin/daemon auth add
+./.venv/bin/daemon
+```
+
+### Run it in any repository
+
+Install Daemon once, then start it from the project directory:
+
+```powershell
+cd C:\path\to\your-project
+C:\path\to\daemon\.venv\Scripts\daemon.exe
+```
+
+Useful one-shot commands:
+
+```powershell
+C:\path\to\daemon\.venv\Scripts\daemon.exe run "Fix the failing tests."
+C:\path\to\daemon\.venv\Scripts\daemon.exe plan "Add login validation."
+C:\path\to\daemon\.venv\Scripts\daemon.exe review
+```
 
 ### Change a direct cloud API key
 
@@ -122,15 +206,17 @@ For direct cloud API use, create or revoke keys at
 ### Useful checks
 
 ```powershell
-.\.venv\Scripts\python.exe -m daemon.cli auth list
-.\.venv\Scripts\python.exe -m daemon.cli auth models
-.\.venv\Scripts\python.exe -m daemon.cli config get default_model
-.\.venv\Scripts\python.exe -m daemon.cli config get models.coding
-.\.venv\Scripts\python.exe -m daemon.cli doctor
+.\.venv\Scripts\daemon.exe doctor
+.\.venv\Scripts\daemon.exe auth list
+.\.venv\Scripts\daemon.exe models list
+.\.venv\Scripts\daemon.exe config get default_model
+.\.venv\Scripts\daemon.exe config get models.coding
 ```
 
-On Linux or macOS, replace the Windows Python path with `python` after
-installing the package: `python -m pip install -e '.[crypto]'`.
+If `daemon` is not recognized, use the explicit `.venv\Scripts\daemon.exe`
+path shown above. The package entry point is created inside the virtual
+environment; Python module execution is also available as
+`.\.venv\Scripts\python.exe -m daemon.cli`.
 
 ## Commands
 
