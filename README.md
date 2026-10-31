@@ -52,7 +52,9 @@ changed: bug.py
 Daemon follows the same shape as OpenCode, OpenClaw and Hermes: install once,
 connect one model provider, then run `daemon` in the repository you want to
 change. You do not need to activate a virtual environment and you do not need
-to edit TOML by hand.
+to edit TOML by hand. For the shortest interactive commands, activate the
+virtual environment once in each new PowerShell window; otherwise use the
+explicit `.\.venv\Scripts\daemon.exe` path.
 
 ### Windows: copy these three steps
 
@@ -70,13 +72,14 @@ Set-Location .\daemon
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 
 # 3. Connect Ollama, choose a model, configure every agent role, and start
-.\.venv\Scripts\daemon.exe auth add --provider ollama
-.\.venv\Scripts\daemon.exe models list
+.\.venv\Scripts\Activate.ps1
+daemon auth add --provider ollama
+daemon models list
 $model = Read-Host "Enter the exact model id shown above"
-.\.venv\Scripts\daemon.exe models set default $model
-.\.venv\Scripts\daemon.exe models set build $model
-.\.venv\Scripts\daemon.exe models set coding $model
-.\.venv\Scripts\daemon.exe
+daemon models set default $model
+daemon models set build $model
+daemon models set coding $model
+daemon
 ```
 
 If `daemon` already exists, skip step 1 and run:
@@ -89,6 +92,18 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 The installer creates `.venv`, installs secure credential storage and REPL
 history, and always installs relative to the repository—not the folder where
 PowerShell happened to be opened.
+
+If PowerShell says `daemon` is not recognized, activate the environment in
+that same window:
+
+```powershell
+Set-Location $HOME\Downloads\daemon
+.\.venv\Scripts\Activate.ps1
+daemon
+```
+
+For scripts or CI, skip activation and use
+`.\.venv\Scripts\daemon.exe`.
 
 ### Use a local Ollama model
 

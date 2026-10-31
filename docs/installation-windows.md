@@ -31,6 +31,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 .\.venv\Scripts\daemon.exe version
 ```
 
+For interactive use, activate the environment once in each new PowerShell
+window:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+daemon version
+```
+
+Without activation, always call `.\.venv\Scripts\daemon.exe` explicitly.
+
 If scripts are blocked by execution policy:
 
 ```powershell
@@ -60,13 +70,14 @@ git present.
 
 ```powershell
 Set-Location $HOME\Downloads\daemon
-.\.venv\Scripts\daemon.exe auth add --provider ollama
-.\.venv\Scripts\daemon.exe models list
+.\.venv\Scripts\Activate.ps1
+daemon auth add --provider ollama
+daemon models list
 $model = Read-Host "Enter the exact model id shown above"
-.\.venv\Scripts\daemon.exe models set default $model
-.\.venv\Scripts\daemon.exe models set build $model
-.\.venv\Scripts\daemon.exe models set coding $model
-.\.venv\Scripts\daemon.exe
+daemon models set default $model
+daemon models set build $model
+daemon models set coding $model
+daemon
 ```
 
 The `build` role matters because `daemon run` uses it by default. Configure it
