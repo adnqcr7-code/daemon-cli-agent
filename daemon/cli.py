@@ -359,8 +359,8 @@ def models_recommend(task: str, workspace: Path | None) -> None:
 
 
 @models.command("set")
-@click.argument("role", type=click.Choice(["default", "coding", "planning",
-                                           "research", "review"]))
+@click.argument("role", type=click.Choice(["default", "build", "coding",
+                                           "planning", "research", "review"]))
 @click.argument("model_id")
 def models_set(role: str, model_id: str) -> None:
     """Configure the model used for a role."""

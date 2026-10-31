@@ -41,6 +41,18 @@ errors; mid-stream failures are not retried (no duplicated output).
 `--base-url` (custom endpoint). For Azure, set the model to your
 *deployment name*: `daemon config set models.coding <deployment>`.
 
+**"Configured build model ... is not available"**
+List models and copy the exact id. Then configure all roles used by the
+interactive and one-shot commands:
+
+```powershell
+daemon models list --refresh
+$model = Read-Host "Exact model id"
+daemon models set default $model
+daemon models set build $model
+daemon models set coding $model
+```
+
 **Cost shows "unknown"**
 The curated catalog has no pricing data for that model. Contributions
 welcome (see `daemon/models.py`).

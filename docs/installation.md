@@ -11,12 +11,19 @@ Daemon is a Python 3.11+ CLI. It runs on Windows 10/11, Linux and macOS.
 ## Install from source
 
 ```bash
-git clone <this repository> daemon
+git clone https://github.com/adnqcr7-code/daemon-cli-agent.git daemon
 cd daemon
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
-pip install .
-daemon version
+./scripts/install.sh
+```
+
+The installer locates the repository from its own script path, so it is safe
+to launch it from another working directory. On Windows, use
+`powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1` instead.
+
+Verify the installation with:
+
+```bash
+./.venv/bin/daemon version
 ```
 
 For development (tests included):

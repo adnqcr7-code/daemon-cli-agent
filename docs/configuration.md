@@ -35,6 +35,7 @@ the credential store rather than writing an unrelated configuration key.
 default_provider = null            # taken from the active auth profile
 default_model = null
 [models]
+build = null                       # model used by daemon run
 coding = null                      # role-specific model ids
 planning = null
 research = null

@@ -122,6 +122,8 @@ def test_full_workflow(runner, mock, encrypted_home, workspace):
                      str(workspace))
     assert "mock-coder" in result.output and "mock-fast" in result.output
     _invoke(runner, "config", "set", "models.build", "mock-coder")
+    result = _invoke(runner, "models", "set", "build", "mock-coder")
+    assert "models.build = mock-coder" in result.output
 
     # -- 4. run the task non-interactively ----------------------------------
     result = _invoke(runner, "run", "Fix the failing test in this repository.",

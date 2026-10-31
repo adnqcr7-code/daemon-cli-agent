@@ -54,22 +54,41 @@ connect one model provider, then run `daemon` in the repository you want to
 change. You do not need to activate a virtual environment and you do not need
 to edit TOML by hand.
 
-### Windows (recommended)
+### Windows: copy these three steps
 
-From a PowerShell window in this repository:
+Start PowerShell from any normal folder such as `Downloads`. Do not run Git
+from `C:\Windows\System32`, and do not paste the three steps into one
+unfinished multiline prompt. Run each step after the previous one finishes:
 
 ```powershell
-.\scripts\install.ps1
+# 1. Download Daemon and enter its folder
+Set-Location $HOME\Downloads
+git clone https://github.com/adnqcr7-code/daemon-cli-agent.git daemon
+Set-Location .\daemon
+
+# 2. Install Daemon (the script also works when called from another folder)
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+
+# 3. Connect Ollama, choose a model, configure every agent role, and start
+.\.venv\Scripts\daemon.exe auth add --provider ollama
+.\.venv\Scripts\daemon.exe models list
+$model = Read-Host "Enter the exact model id shown above"
+.\.venv\Scripts\daemon.exe models set default $model
+.\.venv\Scripts\daemon.exe models set build $model
+.\.venv\Scripts\daemon.exe models set coding $model
+.\.venv\Scripts\daemon.exe
 ```
 
-If PowerShell blocks scripts, run it once with:
+If `daemon` already exists, skip step 1 and run:
 
 ```powershell
+Set-Location $HOME\Downloads\daemon
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
-The installer creates `.venv`, installs Daemon with secure credential storage
-and REPL history, and prints the exact command paths.
+The installer creates `.venv`, installs secure credential storage and REPL
+history, and always installs relative to the repository—not the folder where
+PowerShell happened to be opened.
 
 ### Use a local Ollama model
 
@@ -87,6 +106,7 @@ Choose the exact model id printed by `models list`, for example
 
 ```powershell
 .\.venv\Scripts\daemon.exe models set default gemma4:e4b
+.\.venv\Scripts\daemon.exe models set build gemma4:e4b
 .\.venv\Scripts\daemon.exe models set coding gemma4:e4b
 .\.venv\Scripts\daemon.exe run "Inspect this project and fix the failing tests."
 ```

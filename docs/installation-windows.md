@@ -20,10 +20,14 @@ python --version
 
 ## 2. Install Daemon
 
+Run these commands one at a time from a normal folder such as
+`$HOME\Downloads`. Never clone into `C:\Windows\System32`.
+
 ```powershell
+Set-Location $HOME\Downloads
 git clone https://github.com/adnqcr7-code/daemon-cli-agent.git daemon
-cd daemon
-.\scripts\install.ps1
+Set-Location .\daemon
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 .\.venv\Scripts\daemon.exe version
 ```
 
@@ -51,6 +55,23 @@ python -m pip install "daemon-agent[keyring,crypto,repl]"
 Expected on a healthy machine: Python 3.11+, `pwsh` or `powershell`
 detected, credential storage = *os-keychain* (with the keyring extra),
 git present.
+
+## 3. First Ollama run
+
+```powershell
+Set-Location $HOME\Downloads\daemon
+.\.venv\Scripts\daemon.exe auth add --provider ollama
+.\.venv\Scripts\daemon.exe models list
+$model = Read-Host "Enter the exact model id shown above"
+.\.venv\Scripts\daemon.exe models set default $model
+.\.venv\Scripts\daemon.exe models set build $model
+.\.venv\Scripts\daemon.exe models set coding $model
+.\.venv\Scripts\daemon.exe
+```
+
+The `build` role matters because `daemon run` uses it by default. Configure it
+alongside `default` and `coding` to avoid a stale or missing build-model
+error.
 
 ## Notes
 

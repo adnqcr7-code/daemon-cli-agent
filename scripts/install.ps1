@@ -2,6 +2,11 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "Installing Daemon..." -ForegroundColor Cyan
 
+# Always install from the repository containing this script, even when the
+# script is launched by absolute path from another working directory.
+$repoRoot = Split-Path -Parent $PSScriptRoot
+Set-Location $repoRoot
+
 $python = $null
 $pythonArgs = @()
 

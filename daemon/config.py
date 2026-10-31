@@ -44,6 +44,7 @@ DEFAULTS: dict[str, Any] = {
     "default_provider": None,
     "default_model": None,
     "models": {
+        "build": None,
         "coding": None,
         "planning": None,
         "research": None,
