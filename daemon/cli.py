@@ -321,20 +321,12 @@ def models_list(refresh: bool, workspace: Path | None) -> None:
 
     try:
         ctx = build_context(workspace=workspace, config=config,
-                            interactive=False, require_auth=True)
+                            interactive=False, require_auth=True,
+                            select_model=False, refresh_models=refresh)
     except DaemonError as exc:
         _fail(exc)
     renderer = _make_renderer(config)
     try:
-        if refresh and ctx.auth is not None:
-            active = ctx.auth.store.active()
-            if active is not None:
-                from .models import ModelRegistry
-
-                registry = ModelRegistry(daemon_home())
-                ctx.models = asyncio.run(registry.load_async(
-                    ctx.adapter, active.id, refresh=True))
-                asyncio.run(ctx.adapter.close())
         renderer.models_table(ctx.models)
     finally:
         ctx.close()
@@ -860,6 +852,18 @@ def config_get(dotted: str) -> None:
                                                    path_type=Path), default=None)
 def config_set(dotted: str, value: str, as_project: bool,
                workspace: Path | None) -> None:
+    if dotted == "active_profile" and not as_project:
+        from .auth.manager import AuthManager
+
+        try:
+            manager = AuthManager(Config.load(workspace))
+            profile = manager.switch(value)
+            manager.close()
+        except DaemonError as exc:
+            _fail(exc)
+        _echo(f"Active profile: {profile.id}", color="green")
+        return
+
     cfg = Config.load(workspace)
     parsed: object
     if value.lower() in ("true", "false"):

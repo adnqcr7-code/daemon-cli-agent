@@ -76,6 +76,24 @@ def test_version_and_help(runner):
         assert command in result.output
 
 
+def test_config_active_profile_switches_auth_profile(runner):
+    from daemon.auth.manager import AuthManager
+    from daemon.auth.store import Profile
+
+    manager = AuthManager()
+    manager.store.add(Profile(provider="ollama", label="first"),
+                      allow_keyless=True)
+    manager.store.add(Profile(provider="ollama", label="second"),
+                      allow_keyless=True)
+    manager.close()
+
+    result = _invoke(runner, "config", "set", "active_profile",
+                     "ollama#second")
+    assert "Active profile: ollama#second" in result.output
+    result = _invoke(runner, "auth", "list")
+    assert "* ollama#second" in result.output
+
+
 def test_full_workflow(runner, mock, encrypted_home, workspace):
     endpoint = mock.url + "/v1"
 
@@ -94,6 +112,16 @@ def test_full_workflow(runner, mock, encrypted_home, workspace):
     # -- 3. models are visible through the cache ---------------------------
     result = _invoke(runner, "models", "list", "-w", str(workspace))
     assert "mock-coder" in result.output and "mock-fast" in result.output
+
+    # Model inspection must remain usable when a stale configured role model
+    # no longer exists on the active provider.
+    _invoke(runner, "config", "set", "models.build", "stale-model")
+    result = _invoke(runner, "models", "list", "-w", str(workspace))
+    assert "mock-coder" in result.output and "mock-fast" in result.output
+    result = _invoke(runner, "models", "list", "--refresh", "-w",
+                     str(workspace))
+    assert "mock-coder" in result.output and "mock-fast" in result.output
+    _invoke(runner, "config", "set", "models.build", "mock-coder")
 
     # -- 4. run the task non-interactively ----------------------------------
     result = _invoke(runner, "run", "Fix the failing test in this repository.",
