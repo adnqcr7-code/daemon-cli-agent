@@ -72,17 +72,20 @@ git present.
 Set-Location $HOME\Downloads\daemon
 .\.venv\Scripts\Activate.ps1
 daemon auth add --provider ollama
+daemon auth switch ollama
 daemon models list
 $model = Read-Host "Enter the exact model id shown above"
 daemon models set default $model
-daemon models set build $model
+daemon config set models.build $model
 daemon models set coding $model
 daemon
 ```
 
 The `build` role matters because `daemon run` uses it by default. Configure it
 alongside `default` and `coding` to avoid a stale or missing build-model
-error.
+error. `daemon config set models.build <id>` also works with releases where
+`daemon models set build` is not available. If adding the Ollama profile says
+it already exists, continue with `daemon auth switch ollama`.
 
 ## Notes
 

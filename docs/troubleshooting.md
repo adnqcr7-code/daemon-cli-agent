@@ -49,9 +49,18 @@ interactive and one-shot commands:
 daemon models list --refresh
 $model = Read-Host "Exact model id"
 daemon models set default $model
-daemon models set build $model
+daemon config set models.build $model
 daemon models set coding $model
 ```
+
+If `daemon models set build` is available in your version, it is equivalent
+to `daemon config set models.build <id>`. The config command works with
+older releases too.
+
+**`daemon auth add` says the profile already exists**
+This is harmless; it means no new profile was created. To use the local
+Ollama profile rather than another active provider, run
+`daemon auth switch ollama` and then `daemon models list`.
 
 **Cost shows "unknown"**
 The curated catalog has no pricing data for that model. Contributions

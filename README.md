@@ -74,10 +74,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 # 3. Connect Ollama, choose a model, configure every agent role, and start
 .\.venv\Scripts\Activate.ps1
 daemon auth add --provider ollama
+daemon auth switch ollama
 daemon models list
 $model = Read-Host "Enter the exact model id shown above"
 daemon models set default $model
-daemon models set build $model
+daemon config set models.build $model
 daemon models set coding $model
 daemon
 ```
@@ -111,9 +112,14 @@ Install and start Ollama, then run:
 
 ```powershell
 .\.venv\Scripts\daemon.exe auth add --provider ollama
+.\.venv\Scripts\daemon.exe auth switch ollama
 .\.venv\Scripts\daemon.exe models list
 .\.venv\Scripts\daemon.exe
 ```
+
+If `auth add` says the Ollama profile already exists, that is okay: continue
+with `auth switch ollama`. Adding a profile does not automatically make an
+already-existing profile active.
 
 Choose the exact model id printed by `models list`, for example
 `gemma4:e4b`. Ollama model ids are exact: `gemma4:e4b` is not the same as
@@ -121,7 +127,7 @@ Choose the exact model id printed by `models list`, for example
 
 ```powershell
 .\.venv\Scripts\daemon.exe models set default gemma4:e4b
-.\.venv\Scripts\daemon.exe models set build gemma4:e4b
+.\.venv\Scripts\daemon.exe config set models.build gemma4:e4b
 .\.venv\Scripts\daemon.exe models set coding gemma4:e4b
 .\.venv\Scripts\daemon.exe run "Inspect this project and fix the failing tests."
 ```
