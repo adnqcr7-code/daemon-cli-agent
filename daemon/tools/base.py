@@ -18,7 +18,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from ..errors import ToolError
+from ..errors import ToolError, UsageLimitExceeded
 from ..log import audit, get_logger
 from ..security import redact
 
@@ -53,6 +53,7 @@ class ToolContext:
         *,
         checkpoints=None,
         memory=None,
+        compact_context: Callable[[], Awaitable[tuple[bool, int, int]]] | None = None,
         on_event: Callable[[ToolEvent], Awaitable[None]] | None = None,
     ) -> None:
         from pathlib import Path
@@ -61,6 +62,7 @@ class ToolContext:
         self.config = config
         self.checkpoints = checkpoints  # CheckpointManager or None
         self.memory = memory  # MemoryStore or None
+        self.compact_context = compact_context
         self._on_event = on_event
 
     async def emit(self, tool: str, line: str) -> None:
@@ -190,6 +192,8 @@ class ToolRegistry:
         except ToolError as exc:
             audit("tool-error", tool=name, detail=str(exc))
             return ToolOutput(content=f"{name}: {exc}", is_error=True)
+        except UsageLimitExceeded:
+            raise
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - tools must never crash the agent

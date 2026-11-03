@@ -378,12 +378,14 @@ def models_set(role: str, model_id: str) -> None:
 @main.command()
 @click.argument("task")
 @click.option("--model", "-m", default=None)
+@click.option("--profile", default=None,
+              help="Credential profile to use without changing the active profile")
 @click.option("--yes", "assume_yes", is_flag=True,
               help="Assume-yes for permission prompts (CI/scripting)")
 @click.option("--json", "as_json", is_flag=True, help="Structured output")
 @_workspace_option
-def run(task: str, model: str | None, assume_yes: bool, as_json: bool,
-        workspace: Path | None) -> None:
+def run(task: str, model: str | None, profile: str | None, assume_yes: bool,
+        as_json: bool, workspace: Path | None) -> None:
     """Run one task non-interactively, then exit."""
     from .context import attach_mcp_tools, build_context
 
@@ -391,7 +393,7 @@ def run(task: str, model: str | None, assume_yes: bool, as_json: bool,
     try:
         ctx = build_context(workspace=workspace, config=config,
                             interactive=False, assume_yes=assume_yes,
-                            model_id=model)
+                            model_id=model, profile_id=profile)
         from daemon.agent.runtime import AgentUI
 
         if as_json:
@@ -412,8 +414,12 @@ def run(task: str, model: str | None, assume_yes: bool, as_json: bool,
         click.echo(json.dumps({
             "ok": not result.interrupted,
             "text": result.text,
+            "provider": ctx.model.provider,
+            "model": ctx.model.model_id,
             "steps": result.steps,
             "tool_calls": result.tool_calls,
+            "permission_prompts": result.permission_prompts,
+            "duration_s": round(result.duration_s, 3),
             "usage": ctx.session.usage.to_json(),
             "cost_usd": result.cost_usd,
             "files_changed": result.files_changed,
@@ -426,6 +432,36 @@ def run(task: str, model: str | None, assume_yes: bool, as_json: bool,
         if result.interrupted:
             sys.exit(130)
     ctx.close()
+
+
+@main.command("eval")
+@click.option("--target", multiple=True, required=True,
+              help="Run against PROFILE=MODEL_ID; use =MODEL_ID for the active profile")
+@click.option("--tasks", "task_file", type=click.Path(exists=True, dir_okay=False,
+                                                      path_type=Path),
+              default=None, help="Evaluation task JSON file")
+@click.option("--output", type=click.Path(dir_okay=False, path_type=Path),
+              default=None, help="Write the JSON report to this path")
+def evaluate(target: tuple[str, ...], task_file: Path | None,
+             output: Path | None) -> None:
+    """Run repository-task evaluations and report quality and cost metrics."""
+    from .evaluation import run_evaluations
+
+    try:
+        report = run_evaluations(
+            target, task_file=task_file or (
+                Path(__file__).resolve().parent / "evals" / "tasks.json"))
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    rendered = json.dumps(report, indent=2)
+    if output is not None:
+        try:
+            output.write_text(rendered + "\n", encoding="utf-8")
+        except OSError as exc:
+            raise click.ClickException(
+                f"Cannot write report to {output}: {exc}") from exc
+    else:
+        click.echo(rendered)
 
 
 @main.command()

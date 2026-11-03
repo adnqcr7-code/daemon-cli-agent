@@ -35,7 +35,7 @@ def test_optimizer_context_can_be_disabled():
 
 
 def test_deduplicate_consecutive_identical_tool_results():
-    """Consecutive identical tool results should be merged."""
+    """Duplicate tool payloads shrink without dropping tool-result messages."""
     config = Config({
         "optimization": {
             "enabled": True,
@@ -62,14 +62,41 @@ def test_deduplicate_consecutive_identical_tool_results():
 
     optimized, stats = run_async(optimizer.optimize(messages, tools, 128_000))
 
-    # Should have removed one duplicate
+    # One duplicate payload is shortened, but its result message is retained.
     assert stats.tool_results_merged == 1
     # Find the tool result messages (user messages with tool_results)
     tool_msgs = [m for m in optimized if m.role == "user" and m.tool_results]
-    assert len(tool_msgs) == 2  # msg2 and msg4 (msg3 was duplicate)
+    assert len(tool_msgs) == 3
     # Check content
     assert tool_msgs[0].tool_results[0].content == "file content"
-    assert tool_msgs[1].tool_results[0].content == "different content"
+    assert "Duplicate tool result omitted" in tool_msgs[1].tool_results[0].content
+    assert tool_msgs[2].tool_results[0].content == "different content"
+
+
+def test_deduplication_preserves_tool_call_pairings():
+    config = Config({"optimization": {"enabled": True}}, user_path=None,
+                    project_path=None)
+    optimizer = ContextOptimizer(config)
+    messages = [
+        Message.assistant(tool_calls=[
+            ToolCall(id="call-1", name="read_file", arguments={"path": "a.py"})]),
+        Message.with_tool_results([
+            ToolResult(tool_call_id="call-1", tool_name="read_file",
+                       content="same output")]),
+        Message.assistant(tool_calls=[
+            ToolCall(id="call-2", name="read_file", arguments={"path": "a.py"})]),
+        Message.with_tool_results([
+            ToolResult(tool_call_id="call-2", tool_name="read_file",
+                       content="same output")]),
+    ]
+
+    optimized, _ = run_async(optimizer.optimize(messages, [], 128_000))
+
+    assert [call.id for message in optimized for call in message.tool_calls] == [
+        "call-1", "call-2"]
+    assert [item.tool_call_id for message in optimized
+            for item in message.tool_results] == ["call-1", "call-2"]
+    assert "Duplicate tool result omitted" in optimized[-1].tool_results[0].content
 
 
 def test_deduplicate_non_consecutive_not_merged():

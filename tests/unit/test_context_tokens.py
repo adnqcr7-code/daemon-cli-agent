@@ -5,10 +5,11 @@ import asyncio
 from daemon.agent.context import (
     context_budget,
     estimate_tokens,
+    recent_start_index,
     should_compact,
     truncate_tool_output,
 )
-from daemon.providers.types import Message, ToolSpec, Usage
+from daemon.providers.types import Message, ToolCall, ToolResult, ToolSpec, Usage
 
 
 def test_estimate_tokens_ascii():
@@ -52,6 +53,19 @@ def test_should_compact_threshold():
     small = [Message.user("hi")]
     assert should_compact(big, tools, 128_000)
     assert not should_compact(small, tools, 128_000)
+
+
+def test_recent_history_boundary_keeps_tool_round_together():
+    messages = [
+        Message.user("Earlier"),
+        Message.assistant(tool_calls=[
+            ToolCall(id="call-1", name="read_file", arguments={"path": "a.py"})]),
+        Message.with_tool_results([
+            ToolResult(tool_call_id="call-1", tool_name="read_file",
+                       content="file contents")]),
+    ]
+
+    assert recent_start_index(messages, keep_recent=1) == 1
 
 
 def test_truncate_tool_output_keeps_head_and_tail():

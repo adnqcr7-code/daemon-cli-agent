@@ -65,8 +65,8 @@ model and used for argument validation (required keys, basic types) before
 - `network = True` — network egress; the default policy asks.
 
 **`ToolContext`** gives you `workspace_root`, `config`, `checkpoints`,
-`memory` and `await ctx.emit(name, line)` for live progress lines in the
-UI.
+`memory`, the runtime's optional `compact_context` callback, and
+`await ctx.emit(name, line)` for live progress lines in the UI.
 
 **`ToolOutput`**:
 

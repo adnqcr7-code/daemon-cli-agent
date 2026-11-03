@@ -108,6 +108,7 @@ def build_context(
     interactive: bool = True,
     assume_yes: bool = False,
     session_id: str | None = None,
+    profile_id: str | None = None,
     model_id: str | None = None,
     role: str = "build",
     require_auth: bool = True,
@@ -143,7 +144,11 @@ def build_context(
     ctx.auth = auth
 
     if auth is not None:
-        profile = auth.store.active()
+        profile = auth.store.get(profile_id) if profile_id else auth.store.active()
+        if profile_id and profile is None:
+            raise AuthError(
+                f"Credential profile '{profile_id}' does not exist. "
+                "Run 'daemon auth list' to see configured profiles.")
         if profile is None and require_auth:
             raise AuthError(
                 "No provider credentials configured. Run 'daemon auth add' "

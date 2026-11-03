@@ -9,13 +9,15 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
 from typing import Iterable
 
 from ..config import Config
-from ..providers.types import Message, ToolSpec, ToolCall, ToolResult
+from ..providers.types import Message, ToolSpec, ToolCall, ToolResult, Usage
 from .context import (
     conversation_tokens,
     estimate_tokens,
+    recent_start_index,
     should_compact,
     compact_conversation,
 )
@@ -61,6 +63,9 @@ class ContextOptimizer:
         self.preserve_recent_turns = config.get("optimization.context.preserve_recent_turns", 4) if config else 4
         self.dedupe_tool_results = config.get("optimization.context.dedupe_tool_results", True) if config else True
         self.summarize_old_turns = config.get("optimization.context.summarize_old_turns", True) if config else True
+        self.summarize_threshold = float(
+            config.get("optimization.context.summarize_threshold", 0.9)
+            if config else 0.9)
         self.max_summary_length = config.get("optimization.context.max_summary_length", 2000) if config else 2000
 
     async def optimize(
@@ -71,6 +76,7 @@ class ContextOptimizer:
         *,
         adapter=None,
         model_id: str | None = None,
+        on_usage: Callable[[Usage], Awaitable[None]] | None = None,
     ) -> tuple[list[Message], ContextOptimizationStats]:
         """Optimize the conversation context.
 
@@ -90,10 +96,11 @@ class ContextOptimizer:
             stats.tool_results_merged = deduped
 
         # Step 2: If still over budget, summarize old turns
-        if should_compact(messages, tools, context_window, threshold=0.7):
+        if should_compact(messages, tools, context_window,
+                          threshold=self.summarize_threshold):
             if self.summarize_old_turns and adapter and model_id:
                 messages, summarized = await self._summarize_older_turns(
-                    messages, adapter, model_id
+                    messages, adapter, model_id, on_usage=on_usage
                 )
                 stats.summaries_created = summarized
                 stats.turns_removed += summarized
@@ -107,13 +114,10 @@ class ContextOptimizer:
         return messages, stats
 
     def _deduplicate_tool_results(self, messages: list[Message]) -> tuple[list[Message], int]:
-        """Merge consecutive messages with identical tool results.
+        """Shorten duplicate results while keeping every tool-call pairing.
 
         Tool results are stored on user messages (Anthropic convention),
         so we look for user messages with tool_results.
-        
-        We compare entire messages - if a user message with tool_results
-        has the exact same tool results as the previous such message, it's a duplicate.
         """
         if not messages:
             return messages, 0
@@ -125,14 +129,26 @@ class ContextOptimizer:
         for msg in messages:
             # Tool results travel on user messages (role="user")
             if msg.role != "user" or not msg.tool_results:
+                # Preserve the comparison across the assistant call that
+                # naturally separates consecutive tool-result messages.
+                if msg.role != "assistant" or not msg.tool_calls:
+                    prev_tool_msg = None
                 # Not a tool result message, keep as-is
                 result.append(msg)
-                prev_tool_msg = None
                 continue
 
             # Check if this message's tool results match the previous tool message
             if prev_tool_msg is not None and self._tool_results_equal(msg.tool_results, prev_tool_msg.tool_results):
-                # This is a duplicate - skip it
+                # Keep the ids so provider adapters still see a complete tool round.
+                result.append(Message.with_tool_results([
+                    ToolResult(
+                        tool_call_id=item.tool_call_id,
+                        tool_name=item.tool_name,
+                        content="[Duplicate tool result omitted; see the preceding identical result.]",
+                        is_error=item.is_error,
+                    )
+                    for item in msg.tool_results
+                ]))
                 deduped += len(msg.tool_results)
                 continue
 
@@ -160,6 +176,8 @@ class ContextOptimizer:
         messages: list[Message],
         adapter,
         model_id: str,
+        *,
+        on_usage: Callable[[Usage], Awaitable[None]] | None = None,
     ) -> tuple[list[Message], int]:
         """Summarize older conversation turns using the model.
 
@@ -175,8 +193,11 @@ class ContextOptimizer:
         if len(non_system) <= self.preserve_recent_turns:
             return messages, 0
 
-        older = non_system[:-self.preserve_recent_turns]
-        recent = non_system[-self.preserve_recent_turns:]
+        split = recent_start_index(non_system, self.preserve_recent_turns)
+        if split == 0:
+            return messages, 0
+        older = non_system[:split]
+        recent = non_system[split:]
 
         # Build transcript for summarization
         transcript_lines: list[str] = []
@@ -207,6 +228,8 @@ class ContextOptimizer:
         async for event in adapter.chat(request):
             if event.kind == "text" and event.text:
                 summary_text += event.text
+            elif event.kind == "usage" and event.usage is not None and on_usage:
+                await on_usage(event.usage)
 
         if not summary_text.strip():
             summary_text = "(compaction produced no summary; earlier context dropped)"

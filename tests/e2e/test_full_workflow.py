@@ -125,11 +125,16 @@ def test_full_workflow(runner, mock, encrypted_home, workspace):
 
     # -- 4. run the task non-interactively ----------------------------------
     result = _invoke(runner, "run", "Fix the failing test in this repository.",
-                     "--yes", "--json", "-w", str(workspace))
+                     "--yes", "--json", "--profile", "openai",
+                     "-w", str(workspace))
     payload = json.loads(result.output)
     assert payload["ok"] is True
+    assert payload["provider"] == "openai"
+    assert payload["model"] == "mock-coder"
     assert payload["files_changed"] == ["bug.py"]
     assert payload["tool_calls"] == 3
+    assert payload["permission_prompts"] == 0
+    assert payload["duration_s"] >= 0
     assert payload["usage"]["input_tokens"] == 1600
 
     # -- 5. the fix is real; the tests really passed ------------------------
@@ -169,6 +174,51 @@ def test_full_workflow(runner, mock, encrypted_home, workspace):
                 content = path.read_bytes()
                 assert API_KEY.encode() not in content, \
                     f"secret leaked into {path}"
+
+
+def test_eval_runs_packaged_tasks_and_reports_metrics(
+        runner, mock_openai, encrypted_home, tmp_path):
+    import shutil
+
+    fixture = (Path(__file__).resolve().parents[2] / "daemon" / "evals"
+               / "fixtures" / "repair-addition")
+    task_root = tmp_path / "benchmark"
+    task_fixture = task_root / "fixtures" / "repair-addition"
+    task_fixture.parent.mkdir(parents=True)
+    shutil.copytree(fixture, task_fixture)
+    task_file = task_root / "tasks.json"
+    task_file.write_text(json.dumps({"tasks": [{
+        "id": "repair-addition",
+        "prompt": "Fix the failing addition test and run the test suite.",
+        "fixture": "fixtures/repair-addition",
+        "checks": {"files_contain": {
+            "src/calculator.py": "return left + right"}},
+        "verify": ["{python}", "-m", "pytest", "-q"],
+    }]}), encoding="utf-8")
+    mock_openai.stages = [
+        {"tool_calls": [{"name": "edit_file", "arguments": {
+            "path": "src/calculator.py", "old_text": "return left - right",
+            "new_text": "return left + right"}}]},
+        {"tool_calls": [{"name": "run_tests", "arguments": {}}]},
+        {"text": "Addition is fixed and its tests pass."},
+    ]
+    _invoke(runner, "auth", "add", "--api-key", API_KEY,
+            "--provider", "openai", "--base-url", mock_openai.url + "/v1")
+
+    result = _invoke(runner, "eval", "--target", "=mock-coder",
+                     "--tasks", str(task_file))
+    report = json.loads(result.output)
+
+    assert report["summary"] == {"passed": 1, "total": 1, "pass_rate": 1.0}
+    for run in report["runs"]:
+        assert run["provider"] == "openai"
+        assert run["model"] == "mock-coder"
+        assert run["tests_passed"] is True
+        assert run["tool_calls"] == 2
+        assert run["permission_prompts"] == 0
+        assert run["usage"]["input_tokens"] > 0
+        assert run["agent_duration_s"] > 0
+        assert run["elapsed_s"] > 0
 
 
 def test_research_one_shot_is_readonly(runner, mock, encrypted_home,

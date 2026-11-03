@@ -10,6 +10,7 @@ context compaction and clean cancellation.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,6 +44,8 @@ class RunResult:
     cost_usd: float | None = None
     steps: int = 0
     tool_calls: int = 0
+    permission_prompts: int = 0
+    duration_s: float = 0.0
     files_changed: list[str] = field(default_factory=list)
     interrupted: bool = False
 
@@ -108,6 +111,7 @@ class AgentRuntime:
         self._system_prompt_override = system_prompt
         self.extra_context = extra_context  # e.g. TaskTracker.context_block
         self._cumulative_cost = 0.0
+        self._active_result: RunResult | None = None
         self._cost_warned = False
         self._session_cost_known = session_cost(session)
         self._cumulative_cost += self._session_cost_known or 0.0
@@ -116,6 +120,7 @@ class AgentRuntime:
         self.workspace = Path(workspace_root).resolve()
         self.tool_ctx = ToolContext(
             self.workspace, config, checkpoints=checkpoints, memory=memory,
+            compact_context=self._compact_context_for_tool,
             on_event=self._on_tool_event)
         session.meta.model = model.model_id
         session.meta.provider = model.provider
@@ -130,6 +135,8 @@ class AgentRuntime:
     async def run(self, user_text: str) -> RunResult:
         """One user turn -> full tool loop -> final assistant message."""
         result = RunResult()
+        started = time.perf_counter()
+        self._active_result = result
         self.session.add_user(user_text)
         max_turns = self.config.max_turns() if self.config else 40
         try:
@@ -147,6 +154,7 @@ class AgentRuntime:
                         self.model.capabilities.context_window,
                         adapter=self.adapter,
                         model_id=self.model.model_id,
+                        on_usage=self._record_aux_usage,
                     )
                     if opt_stats.tokens_saved > 0:
                         await self.ui.notice(
@@ -155,13 +163,7 @@ class AgentRuntime:
                             level="debug")
                 text, calls, usage = await self._stream_once()
                 if usage is not None:
-                    self.session.add_usage(usage)
-                    cost = estimate_cost_usd(self.model, usage)
-                    if cost is not None:
-                        result.cost_usd = (result.cost_usd or 0.0) + cost
-                        self._cumulative_cost += cost
-                    await self.ui.usage(usage, cost, self._cost_total())
-                    self._check_cost_limits()
+                    await self._record_usage(usage, result)
                 self.session.add_assistant(text or None, calls or None)
                 if not calls:
                     result.text = text or ""
@@ -180,6 +182,8 @@ class AgentRuntime:
             audit("agent-interrupted", model=self.model.model_id)
             raise Interrupted("Run cancelled.") from None
         finally:
+            result.duration_s = time.perf_counter() - started
+            self._active_result = None
             await self.ui.text_done()
             self.session.save()
         return result
@@ -252,6 +256,8 @@ class AgentRuntime:
                 outcomes[call.id] = await self._execute_one(call, result)
             except asyncio.CancelledError:
                 raise
+            except UsageLimitExceeded:
+                raise
             except Exception as exc:  # noqa: BLE001
                 outcomes[call.id] = self._wrap_exception(call, exc)
         result.tool_calls += len(calls)
@@ -261,6 +267,8 @@ class AgentRuntime:
         if isinstance(outcome, ToolResult):
             return outcome
         if isinstance(outcome, asyncio.CancelledError):
+            raise outcome
+        if isinstance(outcome, UsageLimitExceeded):
             raise outcome
         from ..log import describe_exception
 
@@ -278,6 +286,7 @@ class AgentRuntime:
             read_only=tool.read_only, mutating=tool.mutating,
             network=tool.network)
         if decision.effect is Effect.ASK:
+            result.permission_prompts += 1
             decision = await self._resolve_approval(decision)
         if decision.effect is not Effect.ALLOW:
             message = (f"Permission denied for {call.name}: "
@@ -341,16 +350,28 @@ class AgentRuntime:
 
         tools = [ToolSpec(**spec) for spec in specs]
         if not should_compact(self.session.messages, tools,
-                              self.model.capabilities.context_window):
+                              self.model.capabilities.context_window,
+                              threshold=float(
+                                  self.config.get(
+                                      "optimization.context.summarize_threshold",
+                                      0.9) if self.config else 0.9)):
             return
         await self.compact_now()
+
+    async def _compact_context_for_tool(self) -> tuple[bool, int, int]:
+        before = self.context_tokens()
+        compacted = await self.compact_now()
+        return compacted, before, self.context_tokens()
 
     async def compact_now(self) -> bool:
         """Force compaction regardless of the threshold."""
         await self.ui.notice("Compacting conversation context...", level="info")
         try:
             _, new_messages = await compact_conversation(
-                self.adapter, self.model.model_id, self.session.messages)
+                self.adapter, self.model.model_id, self.session.messages,
+                on_usage=self._record_aux_usage)
+        except UsageLimitExceeded:
+            raise
         except Exception as exc:  # noqa: BLE001 - compaction is best effort
             await self.ui.notice(f"Compaction failed: {exc}", level="warn")
             return False
@@ -389,6 +410,23 @@ class AgentRuntime:
     def _cost_total(self) -> float | None:
         return round(self._cumulative_cost, 4) if self._cumulative_cost else None
 
+    async def _record_aux_usage(self, usage: Usage) -> None:
+        await self._record_usage(usage, self._active_result, check_limits=True)
+
+    async def _record_usage(self, usage: Usage, result: RunResult | None,
+                            *, check_limits: bool = True) -> None:
+        self.session.add_usage(usage)
+        if result is not None:
+            result.usage.add(usage)
+        cost = estimate_cost_usd(self.model, usage)
+        if cost is not None:
+            if result is not None:
+                result.cost_usd = (result.cost_usd or 0.0) + cost
+            self._cumulative_cost += cost
+        await self.ui.usage(usage, cost, self._cost_total())
+        if check_limits:
+            self._check_cost_limits()
+
     def _check_cost_limits(self) -> None:
         if self.config is None:
             return
@@ -413,24 +451,34 @@ class AgentRuntime:
 
     def system_prompt(self) -> str:
         if self._system_prompt_override:
-            return self._system_prompt_override
-        project_summary = ""
-        if self.index is not None:
-            try:
-                project_summary = self.index.summary()
-            except Exception as exc:  # noqa: BLE001
-                _logger.debug("index summary failed: %s", exc)
-        memory_block = ""
-        if self.memory is not None:
-            context = self.memory.project_context()
-            if context:
-                memory_block = "Project memory and decisions:\n" + context
-        return build_system_prompt(
-            workspace=str(self.workspace),
-            project_summary=project_summary,
-            memory_block=memory_block,
-            extra=self.extra_context() if self.extra_context else "",
-        )
+            prompt = self._system_prompt_override
+        else:
+            project_summary = ""
+            if self.index is not None:
+                try:
+                    project_summary = self.index.summary()
+                except Exception as exc:  # noqa: BLE001
+                    _logger.debug("index summary failed: %s", exc)
+            memory_block = ""
+            if self.memory is not None:
+                context = self.memory.project_context()
+                if context:
+                    memory_block = "Project memory and decisions:\n" + context
+            prompt = build_system_prompt(
+                workspace=str(self.workspace),
+                project_summary=project_summary,
+                memory_block=memory_block,
+                extra=self.extra_context() if self.extra_context else "",
+            )
+        usage = self.context_usage_pct()
+        if usage is not None:
+            prompt += (
+                f"\n\nContext estimate: {usage:.0%} of the usable context "
+                "budget. This is an estimate, not provider-reported usage. "
+                "When it approaches 70%, use the compact_context tool to "
+                "summarize older history while retaining task-critical facts."
+            )
+        return prompt
 
 
 _FILE_TOOLS = {"write_file", "edit_file", "apply_patch", "delete_path",

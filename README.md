@@ -224,6 +224,7 @@ environment; Python module execution is also available as
 daemon                     interactive engineering agent (the main experience)
 daemon init                initialize project state (.daemon/)
 daemon run "task"          one-shot, non-interactive (CI/scripting; --json)
+daemon eval --target …     run repository task evaluations across models
 daemon plan "goal"         create an implementation plan (--execute to run it)
 daemon review              reviewer subagent over the current diff
 daemon research            the restricted Research agent (REPL or one-shot)
@@ -297,7 +298,7 @@ Adding a provider = one entry in `catalog.py`. Adding a tool = subclass
 
 ## Testing
 
-227 automated tests run the real code paths — mock HTTP servers speak the
+The automated tests run the real code paths — mock HTTP servers speak the
 actual wire protocols (SSE streaming, tool-call chunk reassembly), an MCP
 echo server speaks real JSON-RPC over stdio, and the end-to-end suite drives
 the installed CLI through auth → detection → model discovery → a real repo
@@ -307,11 +308,29 @@ fix → a real pytest run → checkpoint undo. No test requires a paid API key.
 python -m pytest          # unit + integration + security + e2e
 ```
 
+### Task evaluations
+
+Run the realistic repository-task benchmark against one or more configured
+profile/model pairs. The command uses isolated fixture copies and reports task
+checks, test results, provider-reported token usage, tool calls, permission
+prompts, latency and estimated cost:
+
+```powershell
+daemon eval --target anthropic=claude-sonnet-4-5 --target ollama=gemma4:e4b `
+  --output eval-results.json
+```
+
+Use `--target =MODEL_ID` to use the active credential profile. Evaluation
+tasks live in `daemon/evals/tasks.json`; each task names a fixture, expected
+file content and an optional verification command.
+
 ## Honest limitations
 
 - **LSP client**: not implemented in 0.1.0. Code intelligence uses exact
   Python AST analysis plus a documented heuristic scanner for other
-  languages, and delegates to installed linters/formatters when present.
+  languages by default. Optional, explicitly configured LSP servers can
+  provide language-aware symbols, references and diagnostics; installed
+  linters/formatters remain available as fallbacks.
 - **Provider OAuth**: no provider in the catalog offers OAuth for direct API
   use; MCP HTTP OAuth (authorization code + PKCE) is implemented, with
   PKCE/metadata parsing unit-tested and the live browser flow requiring

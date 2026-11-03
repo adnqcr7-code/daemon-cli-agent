@@ -43,6 +43,9 @@ daemon = "daemon.cli:main"
 [tool.setuptools.packages.find]
 include = ["daemon*"]
 
+[tool.setuptools.package-data]
+daemon = ["evals/**/*.json", "evals/**/*.py", "evals/**/*.toml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

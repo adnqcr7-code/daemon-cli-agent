@@ -37,6 +37,8 @@ def read_only_registry() -> ToolRegistry:
     for tool in (ReadFileTool(), ListDirTool(), GlobTool(), SearchFilesTool(),
                  FileInfoTool(), MakeDiffTool(), ProjectMapTool()):
         registry.register(tool)
+    from .misc import CompactContextTool
+    registry.register(CompactContextTool())
     from .git import GitStatusTool, GitDiffTool, GitLogTool, GitBranchesTool, GitShowTool
 
     for tool in (GitStatusTool(), GitDiffTool(), GitLogTool(), GitBranchesTool(),
@@ -56,10 +58,11 @@ def research_registry() -> ToolRegistry:
                      FileInfoTool, ProjectMapTool)
     from .web import WebSearchTool, WebFetchTool
     from .misc import MemoryNoteTool
+    from .misc import CompactContextTool
 
     for tool in (ReadFileTool(), ListDirTool(), GlobTool(), SearchFilesTool(),
                  FileInfoTool(), ProjectMapTool(), WebSearchTool(),
-                 WebFetchTool(), MemoryNoteTool()):
+                 WebFetchTool(), MemoryNoteTool(), CompactContextTool()):
         registry.register(tool)
     return registry
 
