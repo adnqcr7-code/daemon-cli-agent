@@ -9,6 +9,7 @@ by a model-generated summary while recent turns are preserved verbatim.
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 
 from ..errors import ProviderError
 from ..providers.types import ChatRequest, Message, ToolSpec, Usage
@@ -57,6 +58,21 @@ def should_compact(messages: list[Message], tools: list[ToolSpec],
     return conversation_tokens(messages, tools) > budget * threshold
 
 
+def recent_start_index(messages: list[Message], keep_recent: int) -> int:
+    """Choose a recent-history boundary without separating tool calls/results."""
+    split = max(0, len(messages) - max(0, keep_recent))
+    if split == 0 or split == len(messages):
+        return split
+    previous, following = messages[split - 1], messages[split]
+    if previous.role == "assistant" and previous.tool_calls \
+            and following.role == "user" and following.tool_results:
+        called = {call.id for call in previous.tool_calls}
+        returned = {item.tool_call_id for item in following.tool_results}
+        if called.intersection(returned):
+            split -= 1
+    return split
+
+
 def truncate_tool_output(content: str, *, max_chars: int = 60_000) -> str:
     if len(content) <= max_chars:
         return content
@@ -72,12 +88,18 @@ async def compact_conversation(
     messages: list[Message],
     *,
     keep_recent: int = 4,
+    on_usage: Callable[[Usage], Awaitable[None]] | None = None,
 ) -> tuple[Message, list[Message]]:
     """Summarize older turns; returns (summary_message, new_messages)."""
-    if len(messages) <= keep_recent:
+    system = [message for message in messages if message.role == "system"]
+    non_system = [message for message in messages if message.role != "system"]
+    if len(non_system) <= keep_recent:
         return Message.user("(nothing to compact)"), messages
-    older = messages[:-keep_recent]
-    recent = messages[-keep_recent:]
+    split = recent_start_index(non_system, keep_recent)
+    if split == 0:
+        return Message.user("(nothing to compact)"), messages
+    older = non_system[:split]
+    recent = non_system[split:]
     transcript = []
     for message in older:
         if message.text:
@@ -99,12 +121,14 @@ async def compact_conversation(
     async for event in adapter.chat(request):
         if event.kind == "text" and event.text:
             summary_text += event.text
+        elif event.kind == "usage" and event.usage is not None and on_usage:
+            await on_usage(event.usage)
     if not summary_text.strip():
         summary_text = "(compaction produced no summary; earlier context dropped)"
     summary = Message.user(
         "[Context compaction] Summary of the earlier conversation:\n"
         + summary_text.strip())
-    return summary, [summary] + recent
+    return summary, system + [summary] + recent
 
 
 _ = Usage  # reserved for cost-aware compaction policies

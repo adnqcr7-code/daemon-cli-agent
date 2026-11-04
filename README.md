@@ -49,10 +49,22 @@ changed: bug.py
 
 ## Quick start
 
-Daemon follows the same shape as OpenCode, OpenClaw and Hermes: install once,
-connect one model provider, then run `daemon` in the repository you want to
-change. You do not need to activate a virtual environment and you do not need
-to edit TOML by hand.
+Install Daemon, connect a model provider, then run it from the repository you
+want to work on. The installers create an isolated environment and print the
+exact command to use; you do not need to edit TOML by hand.
+
+### Install the latest release
+
+Install the v0.2.0 wheel with Python 3.11 or newer:
+
+```powershell
+python -m pip install --upgrade "daemon-agent[keyring,crypto,repl] @ https://github.com/adnqcr7-code/daemon-cli-agent/releases/download/v0.2.0/daemon_agent-0.2.0-py3-none-any.whl"
+daemon auth add
+cd C:\path\to\your-project
+daemon
+```
+
+For source installs and development, use the platform installers below.
 
 ### Windows (recommended)
 
@@ -224,6 +236,7 @@ environment; Python module execution is also available as
 daemon                     interactive engineering agent (the main experience)
 daemon init                initialize project state (.daemon/)
 daemon run "task"          one-shot, non-interactive (CI/scripting; --json)
+daemon eval --target …     run repository task evaluations across models
 daemon plan "goal"         create an implementation plan (--execute to run it)
 daemon review              reviewer subagent over the current diff
 daemon research            the restricted Research agent (REPL or one-shot)
@@ -297,7 +310,7 @@ Adding a provider = one entry in `catalog.py`. Adding a tool = subclass
 
 ## Testing
 
-227 automated tests run the real code paths — mock HTTP servers speak the
+The automated tests run the real code paths — mock HTTP servers speak the
 actual wire protocols (SSE streaming, tool-call chunk reassembly), an MCP
 echo server speaks real JSON-RPC over stdio, and the end-to-end suite drives
 the installed CLI through auth → detection → model discovery → a real repo
@@ -307,11 +320,26 @@ fix → a real pytest run → checkpoint undo. No test requires a paid API key.
 python -m pytest          # unit + integration + security + e2e
 ```
 
+### Task evaluations
+
+Run the realistic repository-task benchmark against one or more configured
+profile/model pairs. The command uses isolated fixture copies and reports task
+checks, test results, provider-reported token usage, tool calls, permission
+prompts, latency and estimated cost:
+
+```powershell
+daemon eval --target anthropic=claude-sonnet-4-5 --target ollama=gemma4:e4b `
+  --output eval-results.json
+```
+
+Use `--target =MODEL_ID` to use the active credential profile. Evaluation
+tasks live in `daemon/evals/tasks.json`; each task names a fixture, expected
+file content and an optional verification command.
+
 ## Honest limitations
 
-- **LSP client**: not implemented in 0.1.0. Code intelligence uses exact
-  Python AST analysis plus a documented heuristic scanner for other
-  languages, and delegates to installed linters/formatters when present.
+- **LSP availability**: language-server support is opt-in and requires users
+  to install and configure their own servers; Daemon does not download them.
 - **Provider OAuth**: no provider in the catalog offers OAuth for direct API
   use; MCP HTTP OAuth (authorization code + PKCE) is implemented, with
   PKCE/metadata parsing unit-tested and the live browser flow requiring

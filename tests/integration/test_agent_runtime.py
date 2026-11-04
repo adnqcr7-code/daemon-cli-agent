@@ -12,7 +12,7 @@ from daemon.permissions import Effect, PermissionEngine
 from daemon.project import ProjectIndex
 from daemon.providers.catalog import ProviderDescriptor
 from daemon.providers.registry import AdapterRegistry
-from daemon.providers.types import ModelCapabilities
+from daemon.providers.types import Message, ModelCapabilities
 from daemon.tools import default_registry
 
 FIX_STAGES = [
@@ -107,10 +107,40 @@ def test_permission_denial_reaches_the_model(mock_openai, workspace):
 
     result = asyncio.run(go())
     asyncio.run(adapter.close())
+    assert result.permission_prompts == 1
     assert "declined" in result.text
     tool_message = next(m for m in session.messages if m.tool_results)
     assert tool_message.tool_results[0].is_error
     assert "Permission denied" in tool_message.tool_results[0].content
+
+
+def test_model_can_compact_context_with_tool(mock_openai, workspace):
+    mock_openai.stages = [
+        {"tool_calls": [{"name": "compact_context", "arguments": {}}]},
+        {"text": "The user is fixing the addition bug; preserve that goal."},
+        {"text": "I compacted the earlier history and continued."},
+    ]
+    runtime, adapter, session = _runtime(mock_openai, workspace, assume_yes=True)
+    session.messages = [
+        Message.user(f"Earlier turn {index}: " + ("details " * 120))
+        for index in range(7)
+    ]
+
+    result = asyncio.run(runtime.run("Continue the task."))
+    asyncio.run(adapter.close())
+
+    assert result.tool_calls == 1
+    assert result.permission_prompts == 0
+    assert result.duration_s > 0
+    assert result.usage.input_tokens > 0
+    assert session.usage.input_tokens == result.usage.input_tokens
+    assert any("The user is fixing the addition bug" in (message.text or "")
+               for message in session.messages)
+    assert "compact_context" in [
+        tool["function"]["name"]
+        for tool in mock_openai.requests[0]["tools"]
+    ]
+    assert "Context estimate:" in mock_openai.requests[0]["messages"][0]["content"]
 
 
 def test_hard_floor_blocks_dangerous_commands_even_when_approved(

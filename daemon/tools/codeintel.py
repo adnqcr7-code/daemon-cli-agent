@@ -1,13 +1,8 @@
 """Coding intelligence: symbols, references, diagnostics, formatting, tests.
 
-Python support is real AST-based analysis (stdlib ``ast``). Other languages
-use a documented heuristic scanner (declaration regexes) which finds the
-common shapes but is not a parser. Diagnostics and formatting delegate to
-installed linters/formatters when present and say so honestly when absent.
-
-A full Language Server Protocol client is the intended evolution of this
-module (see docs/roadmap notes in the README); the AST/regex core is
-deliberately dependency-free and works everywhere.
+Code intelligence uses an explicitly configured language server when
+available, then falls back to Python AST and documented lexical heuristics.
+Diagnostics and formatting also use installed project linters/formatters.
 """
 
 from __future__ import annotations
@@ -165,8 +160,8 @@ class FindSymbolsTool(Tool):
     name = "find_symbols"
     description = (
         "List symbols (functions, classes, types) in a file or directory. "
-        "Python uses exact AST analysis; other languages use a heuristic "
-        "declaration scanner.")
+        "Uses a configured language server for files when available, Python "
+        "AST for Python, and heuristic declaration scanning as fallback.")
     parameters = {
         "type": "object",
         "properties": {
@@ -187,11 +182,25 @@ class FindSymbolsTool(Tool):
         else:
             files = [p for p in _source_files(root)][:400]
         results: list[str] = []
-        method = "ast"
+        method = "ast + heuristic"
+        lsp_error = None
         for path in files:
             rel = _rel(path, ctx.workspace_root)
             try:
-                symbols, used = extract_symbols(path)
+                used = "unsupported"
+                symbols = None
+                if root.is_file():
+                    from .lsp import document_symbols
+
+                    symbols, lsp_error = await document_symbols(ctx, path)
+                if symbols is None:
+                    symbols, used = extract_symbols(path)
+                    if used == "ast":
+                        method = "ast"
+                    elif used == "heuristic":
+                        method = "ast + heuristic"
+                else:
+                    method = "language server"
             except SyntaxError as exc:
                 results.append(f"{rel}: SYNTAX ERROR line {exc.lineno}: {exc.msg}")
                 continue
@@ -210,11 +219,15 @@ class FindSymbolsTool(Tool):
                     f"{rel}:{symbol['line']} {symbol['kind']} "
                     f"{symbol['name']}{symbol['signature']}")
         if not results:
-            return ToolOutput(content="No symbols found.")
+            note = f"\n[LSP unavailable: {lsp_error}; used fallback analysis]" if lsp_error else ""
+            return ToolOutput(content="No symbols found." + note)
         truncated = "" if len(results) <= 400 else f"\n[truncated at 400 symbols]"
+        fallback_note = (
+            f"\n[LSP unavailable: {lsp_error}; used fallback analysis]"
+            if lsp_error and method != "language server" else "")
         return ToolOutput(
             content="\n".join(results[:400]) + truncated +
-                    f"\n[analysis: {method}]",
+                    f"\n[analysis: {method}]" + fallback_note,
             metadata={"method": method})
 
 
@@ -241,13 +254,16 @@ def os_walk_pruned(root: Path):
 class ReferencesTool(Tool):
     name = "references"
     description = (
-        "Count references to a symbol across the project. Python counts "
-        "are AST-accurate; other languages use word-boundary matching.")
+        "Find references to a symbol across the project. Provide path, line "
+        "and column to use a configured language server for exact references; "
+        "otherwise Python AST and lexical matching provide approximate counts.")
     parameters = {
         "type": "object",
         "properties": {
             "symbol": {"type": "string"},
             "path": {"type": "string", "description": "Limit search to a subtree"},
+            "line": {"type": "integer", "description": "1-based symbol line for exact LSP references"},
+            "column": {"type": "integer", "description": "1-based symbol column for exact LSP references"},
         },
         "required": ["symbol"],
     }
@@ -258,6 +274,40 @@ class ReferencesTool(Tool):
     async def run(self, args: dict, ctx: ToolContext) -> ToolOutput:
         symbol = args["symbol"]
         root = resolve_in_root(ctx.workspace_root, args.get("path") or ".")
+        if ("line" in args) != ("column" in args):
+            raise ToolError("Provide both line and column for LSP reference lookup.")
+        if "line" in args:
+            if not root.is_file():
+                raise ToolError("LSP reference lookup requires path to a source file.")
+            if args["line"] < 1 or args["column"] < 1:
+                raise ToolError("Reference line and column are 1-based positive integers.")
+            from .lsp import find_references, uri_path
+
+            locations, lsp_error = await find_references(
+                ctx, root, args["line"], args["column"])
+            if locations is not None:
+                if not locations:
+                    return ToolOutput(content=f"No LSP references to '{symbol}' found.")
+                rows = []
+                for location in locations[:400]:
+                    uri = str(location.get("uri") or location.get("targetUri") or "")
+                    target = uri_path(uri)
+                    try:
+                        target = target.relative_to(ctx.workspace_root)
+                    except ValueError:
+                        pass
+                    location_range = (location.get("range")
+                                      or location.get("targetSelectionRange")
+                                      or location.get("targetRange") or {})
+                    start = location_range.get("start", {})
+                    rows.append(
+                        f"{target}:{int(start.get('line', 0)) + 1}:"
+                        f"{int(start.get('character', 0)) + 1}")
+                return ToolOutput(
+                    content=f"'{symbol}': {len(locations)} LSP reference(s)\n" +
+                            "\n".join(rows))
+        else:
+            lsp_error = None
         word = re.compile(rf"\b{re.escape(symbol)}\b")
 
         def _scan() -> list[tuple[str, int]]:
@@ -284,11 +334,16 @@ class ReferencesTool(Tool):
 
         hits = await asyncio.to_thread(_scan)
         if not hits:
-            return ToolOutput(content=f"No references to '{symbol}' found.")
+            note = f" LSP unavailable ({lsp_error}); " if lsp_error else ""
+            return ToolOutput(content=f"No references to '{symbol}' found.{note}")
         body = "\n".join(f"{file}: {count}" for file, count in sorted(hits))
         total = sum(count for _, count in hits)
+        method_note = (
+            f"\n[LSP unavailable: {lsp_error}; using lexical/AST fallback]"
+            if lsp_error else "")
         return ToolOutput(
-            content=f"'{symbol}': {total} reference(s) in {len(hits)} file(s)\n{body}")
+            content=f"'{symbol}': {total} reference(s) in {len(hits)} file(s)\n"
+                    f"{body}{method_note}")
 
 
 def _rel(path: Path, root: Path) -> str:
@@ -317,6 +372,13 @@ class DiagnosticsTool(Tool):
     async def run(self, args: dict, ctx: ToolContext) -> ToolOutput:
         root = resolve_in_root(ctx.workspace_root, args.get("path") or ".")
         sections: list[str] = []
+        from .lsp import diagnostics as lsp_diagnostics
+
+        lsp_files = [root] if root.is_file() else _source_files(root, limit=100)
+        lsp_findings, lsp_errors = await lsp_diagnostics(ctx, lsp_files)
+        if lsp_findings:
+            sections.append("Language-server diagnostics:\n" +
+                            "\n".join(lsp_findings[:500]))
 
         syntax = await asyncio.to_thread(_python_syntax_report, root)
         if syntax:
@@ -335,10 +397,13 @@ class DiagnosticsTool(Tool):
             if out.strip():
                 sections.append(f"tsc:\n{out.strip()[:8000]}")
 
-        if not sections:
+        if not sections and not lsp_errors:
             return ToolOutput(
                 content="No issues found (syntax check clean; no additional "
                         "linters installed).")
+        if lsp_errors:
+            sections.append(
+                "Language-server fallback:\n" + "\n".join(lsp_errors))
         return ToolOutput(content="\n\n".join(sections))
 
 

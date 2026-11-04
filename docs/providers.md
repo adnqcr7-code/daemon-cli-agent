@@ -35,7 +35,7 @@ This is a catalog, not a ceiling: adding a provider is one descriptor entry
   `daemon auth add --provider ollama-cloud`. The endpoint is
   `https://ollama.com/v1`; set `models.coding` to a model available in your
   Ollama Cloud account.
-- **AWS Bedrock / Google Vertex AI**: not natively adaptered in 0.1.0. Route
+- **AWS Bedrock / Google Vertex AI**: not natively supported. Route
   them through a LiteLLM proxy (`daemon auth add --base-url
   http://your-litellm:4000/v1`) or OpenRouter. This is an honest scope
   decision, not a claim of support.

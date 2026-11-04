@@ -7,6 +7,39 @@ from ..errors import ToolError
 from .base import Tool, ToolContext, ToolOutput
 
 
+class CompactContextTool(Tool):
+    name = "compact_context"
+    description = (
+        "Summarize older conversation history while preserving the user's "
+        "goal, decisions, changed files, command results, and next steps. "
+        "Use when the context usage indicator approaches 70%, before more "
+        "important history is lost to the context limit.")
+    parameters = {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    }
+    read_only = True
+    category = "context"
+    timeout_s = 180
+
+    async def run(self, args: dict, ctx: ToolContext) -> ToolOutput:
+        if ctx.compact_context is None:
+            raise ToolError("Context compaction is unavailable in this session.")
+        compacted, before, after = await ctx.compact_context()
+        if not compacted:
+            return ToolOutput(
+                content="Context compaction failed; the existing history was kept.",
+                is_error=True)
+        if after >= before:
+            return ToolOutput(
+                content="No older conversation history could be compacted.")
+        return ToolOutput(
+            content=(f"Older context summarized. Estimated conversation size "
+                     f"changed from {before:,} to {after:,} tokens "
+                     f"(about {before - after:,} fewer)."))
+
+
 class MemoryNoteTool(Tool):
     name = "memory_note"
     description = (
@@ -43,4 +76,5 @@ class MemoryNoteTool(Tool):
 
 
 def register_misc_tools(registry) -> None:
+    registry.register(CompactContextTool())
     registry.register(MemoryNoteTool())

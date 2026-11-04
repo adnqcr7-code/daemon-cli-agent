@@ -76,7 +76,13 @@ enabled = []                       # opt-in local plugin modules
 
 [sessions]
 keep = 50
+
+[updates]
+check = true                         # check GitHub Releases at interactive startup
 ```
+
+The update check runs at most once per day and does not block startup when
+GitHub is unavailable. Disable it with `daemon config set updates.check false`.
 
 ## Environment variables
 
@@ -101,3 +107,38 @@ Estimates come from the curated model catalog and are marked approximate;
 models without known pricing show "cost unknown". `limits.warn_cost_usd`
 prints a warning; `limits.max_cost_usd` aborts the run with a clear error.
 Daemon never switches models silently.
+
+The context estimate is shown to the model on each turn. As it approaches
+70% of the usable context budget, the model can call `compact_context` to
+summarize older history while retaining the goal, decisions, changed files,
+command results and next steps. Daemon keeps an automatic compaction safety
+net at the configured threshold:
+
+```toml
+[optimization.context]
+summarize_threshold = 0.9
+preserve_recent_turns = 4
+```
+
+Token estimates guide budgeting only; provider-reported usage remains the
+source for measured token totals.
+
+## Optional language servers
+
+LSP integration is opt-in. Configure executable argument arrays in the
+user-level `~/.daemon/config.toml` for servers you have installed. Project
+configuration is not allowed to launch language servers; Daemon does not
+download or launch an unconfigured server.
+Without a configured or working server, code-intelligence tools use the
+existing AST, heuristic and installed-linter fallbacks.
+
+```toml
+[code_intelligence.lsp.servers]
+python = ["pyright-langserver", "--stdio"]
+typescript = ["typescript-language-server", "--stdio"]
+```
+
+`find_symbols` uses LSP document symbols for a source-file path.
+`references` accepts `path`, `line` and `column` (1-based) for precise
+language-server references; without a source position it reports AST or
+lexical matches.

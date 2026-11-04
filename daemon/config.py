@@ -79,6 +79,11 @@ DEFAULTS: dict[str, Any] = {
         "extra_ignore": [],
         "max_files": 20000,
     },
+    "code_intelligence": {
+        "lsp": {
+            "servers": {},
+        },
+    },
     "mcp": {
         "servers": {},  # id -> {transport, command/args or url, env, enabled, trusted, headers}
     },
@@ -88,10 +93,14 @@ DEFAULTS: dict[str, Any] = {
     "sessions": {
         "keep": 50,
     },
+    "updates": {
+        "check": True,
+    },
     "optimization": {
         "enabled": True,
         "context": {
             "enabled": True,
+            "summarize_threshold": 0.9,
             "preserve_recent_turns": 4,
             "dedupe_tool_results": True,
             "summarize_old_turns": True,

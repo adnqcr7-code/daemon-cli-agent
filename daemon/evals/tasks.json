@@ -1,0 +1,26 @@
+{
+  "tasks": [
+    {
+      "id": "repair-addition",
+      "prompt": "Fix the failing addition test in this repository. Read the implementation and test, make the smallest correct code change, and run the test suite.",
+      "fixture": "fixtures/repair-addition",
+      "checks": {
+        "files_contain": {
+          "src/calculator.py": "return left + right"
+        }
+      },
+      "verify": ["{python}", "-m", "pytest", "-q"]
+    },
+    {
+      "id": "handle-empty-input",
+      "prompt": "The parser should return an empty list for an empty input string. Implement that behavior and run the tests.",
+      "fixture": "fixtures/handle-empty-input",
+      "checks": {
+        "files_contain": {
+          "src/parser.py": "if not text:"
+        }
+      },
+      "verify": ["{python}", "-m", "pytest", "-q"]
+    }
+  ]
+}

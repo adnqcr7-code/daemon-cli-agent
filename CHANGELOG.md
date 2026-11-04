@@ -3,6 +3,30 @@
 All notable changes to Daemon are documented here.
 The format follows Keep a Changelog; versioning is semantic.
 
+## [0.2.0] - 2026-11-03
+
+First installable GitHub release. The wheel is attached to the GitHub Release;
+Daemon is not currently published on PyPI.
+
+### Added
+- **Model-driven context compaction**: the model can compact older
+  conversation history when context usage is high; automatic compaction
+  remains as a safety net.
+- **Task evaluations**: `daemon eval` runs repository tasks against selected
+  model profiles and reports correctness, tests, tool calls, latency,
+  permissions and token usage.
+- **Optional language-server support**: symbol, reference and diagnostic
+  requests can use configured LSP servers, with the existing analysis as a
+  fallback.
+- **Release update notices**: the interactive startup checks GitHub Releases
+  daily and shows a direct wheel-install command; checks can be disabled.
+- Repository metadata now includes discoverability topics and package URLs.
+
+### Changed
+- Tool-result de-duplication preserves complete tool-call/result pairs.
+- Compaction and evaluation reports include provider-reported usage where
+  available.
+
 ## [0.1.0] - 2026-10-31
 
 Initial public release.
