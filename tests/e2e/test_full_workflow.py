@@ -68,7 +68,7 @@ def _invoke(runner, *args, expect_exit: int = 0):
 
 def test_version_and_help(runner):
     result = _invoke(runner, "version")
-    assert "daemon 0.1.0" in result.output
+    assert "daemon 0.2.0" in result.output
     result = _invoke(runner, "--help")
     for command in ("auth", "models", "run", "plan", "review", "research",
                     "tools", "mcp", "agents", "sessions", "memory", "config",

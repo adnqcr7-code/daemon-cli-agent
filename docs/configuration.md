@@ -76,7 +76,13 @@ enabled = []                       # opt-in local plugin modules
 
 [sessions]
 keep = 50
+
+[updates]
+check = true                         # check GitHub Releases at interactive startup
 ```
+
+The update check runs at most once per day and does not block startup when
+GitHub is unavailable. Disable it with `daemon config set updates.check false`.
 
 ## Environment variables
 

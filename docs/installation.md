@@ -2,6 +2,19 @@
 
 Daemon is a Python 3.11+ CLI. It runs on Windows 10/11, Linux and macOS.
 
+## Install a release
+
+Install the v0.2.0 GitHub release wheel with Python 3.11 or newer:
+
+```powershell
+python -m pip install --upgrade "daemon-agent[keyring,crypto,repl] @ https://github.com/adnqcr7-code/daemon-cli-agent/releases/download/v0.2.0/daemon_agent-0.2.0-py3-none-any.whl"
+daemon auth add
+daemon
+```
+
+The wheel is published as a GitHub Release asset. If you prefer a source
+checkout, use the installer scripts below.
+
 ## Requirements
 
 - Python **3.11, 3.12 or 3.13** (`python3 --version`)
@@ -69,7 +82,16 @@ incremental project index.
 
 ## Updating
 
-Re-run `pip install .` (or `pip install -e .`) from a fresh checkout.
+When a newer GitHub release is available, Daemon displays an update notice
+when the interactive agent starts. Update a package installation with:
+
+```bash
+python -m pip install --upgrade \
+  "daemon-agent @ https://github.com/adnqcr7-code/daemon-cli-agent/releases/download/v0.2.0/daemon_agent-0.2.0-py3-none-any.whl"
+```
+
+For source installations, pull the latest changes and reinstall with
+`pip install .` (or `pip install -e .`).
 User state in `~/.daemon` is forward-compatible across 0.x releases;
 `daemon doctor` after upgrading will flag anything unusual.
 

@@ -49,10 +49,22 @@ changed: bug.py
 
 ## Quick start
 
-Daemon follows the same shape as OpenCode, OpenClaw and Hermes: install once,
-connect one model provider, then run `daemon` in the repository you want to
-change. You do not need to activate a virtual environment and you do not need
-to edit TOML by hand.
+Install Daemon, connect a model provider, then run it from the repository you
+want to work on. The installers create an isolated environment and print the
+exact command to use; you do not need to edit TOML by hand.
+
+### Install the latest release
+
+Install the v0.2.0 wheel with Python 3.11 or newer:
+
+```powershell
+python -m pip install --upgrade "daemon-agent[keyring,crypto,repl] @ https://github.com/adnqcr7-code/daemon-cli-agent/releases/download/v0.2.0/daemon_agent-0.2.0-py3-none-any.whl"
+daemon auth add
+cd C:\path\to\your-project
+daemon
+```
+
+For source installs and development, use the platform installers below.
 
 ### Windows (recommended)
 
@@ -326,11 +338,8 @@ file content and an optional verification command.
 
 ## Honest limitations
 
-- **LSP client**: not implemented in 0.1.0. Code intelligence uses exact
-  Python AST analysis plus a documented heuristic scanner for other
-  languages by default. Optional, explicitly configured LSP servers can
-  provide language-aware symbols, references and diagnostics; installed
-  linters/formatters remain available as fallbacks.
+- **LSP availability**: language-server support is opt-in and requires users
+  to install and configure their own servers; Daemon does not download them.
 - **Provider OAuth**: no provider in the catalog offers OAuth for direct API
   use; MCP HTTP OAuth (authorization code + PKCE) is implemented, with
   PKCE/metadata parsing unit-tested and the live browser flow requiring

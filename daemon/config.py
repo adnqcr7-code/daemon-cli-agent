@@ -93,6 +93,9 @@ DEFAULTS: dict[str, Any] = {
     "sessions": {
         "keep": 50,
     },
+    "updates": {
+        "check": True,
+    },
     "optimization": {
         "enabled": True,
         "context": {

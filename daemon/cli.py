@@ -113,17 +113,35 @@ def main(ctx: click.Context, workspace: Path | None, model: str | None,
     if ctx.invoked_subcommand is not None:
         return
     _launch_repl(workspace=workspace, model=model, theme=theme,
-                 session_id=session, plain=plain)
+                 session_id=session, plain=plain, check_updates=True)
 
 
 def _launch_repl(*, workspace: Path | None, model: str | None, theme: str | None,
                  session_id: str | None, plain: bool,
-                 research: bool = False) -> None:
+                 research: bool = False, check_updates: bool = False) -> None:
     from .context import build_context
     from .ui.repl import Repl, run_research_repl
 
     try:
         config = Config.load(workspace or Path.cwd())
+        if check_updates and config.get("updates.check", True):
+            from .update_check import check_for_update
+
+            latest = check_for_update(__version__, daemon_home())
+            if latest:
+                click.secho(
+                    f"Update available: Daemon {latest} "
+                    f"(current version: {__version__}).",
+                    fg="yellow",
+                )
+                click.echo(
+                    f"Update with `python -m pip install --upgrade "
+                    f"daemon-agent @ https://github.com/adnqcr7-code/"
+                    f"daemon-cli-agent/releases/download/v{latest}/"
+                    f"daemon_agent-{latest}-py3-none-any.whl` "
+                    "or see https://github.com/adnqcr7-code/daemon-cli-agent/"
+                    "releases/latest"
+                )
         renderer = _make_renderer(config, plain=plain, theme=theme)
         ctx = build_context(workspace=workspace, config=config,
                             renderer=renderer, interactive=True,
@@ -163,7 +181,8 @@ def init(path: str) -> None:
     if not config_path.exists():
         config_path.write_text(
             "# Daemon project configuration.\n"
-            "# Docs: https://github.com/daemon-agent/daemon docs/configuration.md\n",
+            "# Docs: https://github.com/adnqcr7-code/daemon-cli-agent "
+            "docs/configuration.md\n",
             encoding="utf-8")
     gitignore = workspace / ".gitignore"
     entry = ".daemon/checkpoints/\n"

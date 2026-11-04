@@ -84,7 +84,7 @@ class LanguageServer:
                         "publishDiagnostics": {"relatedInformation": True},
                     },
                 },
-                "clientInfo": {"name": "Daemon", "version": "0.1.0"},
+                "clientInfo": {"name": "Daemon", "version": "0.2.0"},
             })
             if not isinstance(result, dict):
                 raise LanguageServerError("language server returned invalid initialize data")
