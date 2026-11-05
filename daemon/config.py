@@ -107,12 +107,12 @@ DEFAULTS: dict[str, Any] = {
             "max_summary_length": 2000,
         },
         "tools": {
-            "enabled": False,
+            "enabled": True,
             "min_score": 0.15,
             "max_tools": 20,
         },
         "failure_detection": {
-            "enabled": False,
+            "enabled": True,
             "max_failures": 3,
             "window_turns": 10,
         },

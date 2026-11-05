@@ -3,6 +3,27 @@
 All notable changes to Daemon are documented here.
 The format follows Keep a Changelog; versioning is semantic.
 
+## [Unreleased]
+
+### Added
+- **Task-aware tool pruning**: each request advertises only the tools the
+  task and current session make relevant, keeping the read/edit/search/shell
+  core and anything already used. Pruned tools still execute if called, so
+  capability is unchanged. (`optimization.tools`, on by default.)
+- **Failure-loop intervention**: when one call fails repeatedly with the same
+  error and arguments, the next request gets a short instruction to change
+  approach and try the tools that usually replace the failing one.
+  (`optimization.failure_detection`, on by default.)
+- **Design references from BITON**: `daemon design search|show` and
+  `daemon build from <slug|url>` read a documented interface study (palette,
+  type scale, spacing, components and ordered flow) and start the agent with
+  it as the task. The Build agent also gets read-only `design_search` and
+  `design_get` tools plus an in-session `/design` command.
+
+### Changed
+- The optimization engine now runs all three of its mechanisms by default:
+  context optimization (already on), tool pruning and failure-loop detection.
+
 ## [0.2.0] - 2026-11-03
 
 First installable GitHub release. The wheel is attached to the GitHub Release;
