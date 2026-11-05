@@ -84,6 +84,12 @@ class McpError(DaemonError):
     exit_code = 9
 
 
+class DesignError(DaemonError):
+    """A design reference could not be fetched or resolved."""
+
+    exit_code = 11
+
+
 class CheckpointError(DaemonError):
     """Checkpoint creation or restore failed."""
 
