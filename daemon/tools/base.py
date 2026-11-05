@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from ..errors import ToolError, UsageLimitExceeded
 from ..log import audit, get_logger
@@ -183,7 +184,7 @@ class ToolRegistry:
         try:
             tool.validate(args)
             result = await asyncio.wait_for(tool.run(args, ctx), timeout=limit)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             audit("tool-timeout", tool=name, seconds=limit)
             return ToolOutput(
                 content=f"Tool '{name}' timed out after {limit}s. Narrow the "

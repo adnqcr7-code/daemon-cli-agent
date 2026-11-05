@@ -9,7 +9,6 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 from urllib.request import url2pathname
 
-
 _LANGUAGES = {
     ".py": "python",
     ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
@@ -64,7 +63,7 @@ class LanguageServer:
         self._next_id = 1
         self._notifications: list[dict[str, Any]] = []
 
-    async def __aenter__(self) -> "LanguageServer":
+    async def __aenter__(self) -> LanguageServer:
         try:
             self.process = await asyncio.create_subprocess_exec(
                 *self.command,
@@ -84,13 +83,13 @@ class LanguageServer:
                         "publishDiagnostics": {"relatedInformation": True},
                     },
                 },
-                "clientInfo": {"name": "Daemon", "version": "0.2.0"},
+                "clientInfo": {"name": "Daemon", "version": "0.2.1"},
             })
             if not isinstance(result, dict):
                 raise LanguageServerError("language server returned invalid initialize data")
             await self.notify("initialized", {})
             return self
-        except (OSError, asyncio.TimeoutError, LanguageServerError) as exc:
+        except (TimeoutError, OSError, LanguageServerError) as exc:
             await self._stop()
             raise LanguageServerError(
                 f"could not start {self.command[0]}: {exc}") from exc
@@ -107,16 +106,16 @@ class LanguageServer:
                 await self.request("shutdown", {}, timeout=2.0)
                 await self.notify("exit", {})
                 process.stdin.close()
-            except (OSError, asyncio.TimeoutError, LanguageServerError):
+            except (TimeoutError, OSError, LanguageServerError):
                 pass
         if process.returncode is None:
             try:
                 await asyncio.wait_for(process.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 process.terminate()
                 try:
                     await asyncio.wait_for(process.wait(), timeout=2.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     process.kill()
                     await process.wait()
         self.process = None
@@ -257,7 +256,7 @@ class LanguageServer:
             result = await self.request("textDocument/diagnostic", {
                 "textDocument": {"uri": uri},
             }, timeout=3.0)
-        except (LanguageServerError, asyncio.TimeoutError):
+        except (TimeoutError, LanguageServerError):
             result = None
         if isinstance(result, dict):
             items = result.get("items")
@@ -279,7 +278,7 @@ async def document_symbols(ctx, path: Path) -> tuple[list[dict[str, Any]] | None
         async with LanguageServer(command, ctx.workspace_root) as server:
             uri = await server.open_document(path)
             return await server.document_symbols(uri), None
-    except (OSError, LanguageServerError, asyncio.TimeoutError) as exc:
+    except (TimeoutError, OSError, LanguageServerError) as exc:
         return None, str(exc)
 
 
@@ -293,7 +292,7 @@ async def find_references(ctx, path: Path, line: int,
         async with LanguageServer(command, ctx.workspace_root) as server:
             uri = await server.open_document(path)
             return await server.references(uri, line, column), None
-    except (OSError, LanguageServerError, asyncio.TimeoutError) as exc:
+    except (TimeoutError, OSError, LanguageServerError) as exc:
         return None, str(exc)
 
 
@@ -315,7 +314,7 @@ async def diagnostics(ctx, paths: list[Path]) -> tuple[list[str], list[str]]:
                     for diagnostic in await server.diagnostics(uri):
                         findings.append(_format_diagnostic(path, diagnostic,
                                                             ctx.workspace_root))
-        except (OSError, LanguageServerError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, OSError, LanguageServerError) as exc:
             errors.append(f"{language} LSP ({command[0]}): {exc}")
     return findings, errors
 

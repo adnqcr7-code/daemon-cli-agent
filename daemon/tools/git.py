@@ -28,7 +28,7 @@ async def git(*args: str, cwd: Path, timeout_s: float = 60) -> tuple[int, str]:
     )
     try:
         raw, _ = await asyncio.wait_for(process.communicate(), timeout_s)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         process.kill()
         raise ToolError(f"git {' '.join(args)} timed out")
     return process.returncode or 0, raw.decode("utf-8", errors="replace")
@@ -261,8 +261,12 @@ class GitCheckpointContextTool(Tool):
         if ctx.checkpoints is None:
             raise ToolError("Checkpoints are unavailable in this session.")
         checkpoint_id = args.get("checkpoint") or "latest"
-        restored = await ctx.checkpoints.restore(checkpoint_id)
-        return ToolOutput(content=f"Restored {restored} file(s) from {checkpoint_id}.")
+        report = await ctx.checkpoints.restore_report(checkpoint_id)
+        message = (f"Restored {report.restored} file(s) from {checkpoint_id}.")
+        if report.deleted:
+            message += (f" Deleted {report.deleted} file(s) created after "
+                        "the checkpoint.")
+        return ToolOutput(content=message)
 
 
 def register_git_tools(registry) -> None:
