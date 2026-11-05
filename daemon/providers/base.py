@@ -12,8 +12,9 @@ import asyncio
 import json
 import random
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from types import TracebackType
-from typing import AsyncIterator, TypeVar
+from typing import TypeVar
 
 import httpx
 
@@ -102,7 +103,7 @@ class ProviderAdapter(ABC):
                 raise
             _logger.debug("adapter transport already belonged to a closed loop")
 
-    async def __aenter__(self) -> "ProviderAdapter":
+    async def __aenter__(self) -> ProviderAdapter:
         return self
 
     async def __aexit__(self, exc_type: type[BaseException] | None,
