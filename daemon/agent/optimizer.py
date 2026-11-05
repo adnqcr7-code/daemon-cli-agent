@@ -8,18 +8,15 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, field
 from collections.abc import Awaitable, Callable
-from typing import Iterable
+from dataclasses import dataclass
 
 from ..config import Config
-from ..providers.types import Message, ToolSpec, ToolCall, ToolResult, Usage
+from ..providers.types import Message, ToolResult, ToolSpec, Usage
 from .context import (
     conversation_tokens,
-    estimate_tokens,
     recent_start_index,
     should_compact,
-    compact_conversation,
 )
 
 
@@ -43,7 +40,7 @@ class _ToolResultKey:
     content_hash: str
 
     @classmethod
-    def from_result(cls, result: ToolResult) -> "_ToolResultKey":
+    def from_result(cls, result: ToolResult) -> _ToolResultKey:
         content = result.content.strip()
         content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
         return cls(tool_name=result.tool_name, content_hash=content_hash)
@@ -237,13 +234,20 @@ class ContextOptimizer:
         summary = Message.user(
             "[Context compaction] Summary of the earlier conversation:\n"
             + summary_text.strip()[: self.max_summary_length]
+            + "\n[Note: this summary was built from previews of the older "
+            "turns (tool outputs previewed at 600 characters each); the full "
+            "older outputs are no longer in context.]"
         )
 
         new_messages = system_msgs + [summary] + recent
         return new_messages, len(older)
 
     def _truncate_old_turns(self, messages: list[Message]) -> tuple[list[Message], int]:
-        """Simple fallback: remove oldest non-system turns until under budget."""
+        """Simple fallback: remove oldest non-system turns until under budget.
+
+        A notice message replaces the dropped turns so the loss is visible
+        to the model instead of silent.
+        """
         if len(messages) <= self.preserve_recent_turns + 1:
             return messages, 0
 
@@ -256,7 +260,12 @@ class ContextOptimizer:
         # Keep only recent turns
         recent = non_system[-self.preserve_recent_turns:]
         removed = len(non_system) - len(recent)
-        return system_msgs + recent, removed
+        notice = Message.user(
+            f"[Context optimization] {removed} older turn(s) were dropped "
+            "to fit the context window; their tool outputs and text are no "
+            "longer available. Ask the user or re-read files if you need "
+            "them again.")
+        return system_msgs + [notice] + recent, removed
 
 
 def _normalize_tool_result_content(content: str) -> str:

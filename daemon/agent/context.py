@@ -127,7 +127,10 @@ async def compact_conversation(
         summary_text = "(compaction produced no summary; earlier context dropped)"
     summary = Message.user(
         "[Context compaction] Summary of the earlier conversation:\n"
-        + summary_text.strip())
+        + summary_text.strip()
+        + "\n[Note: this summary was built from previews of the older "
+        "turns (tool outputs previewed at 600 characters each); the full "
+        "older outputs are no longer in context.]")
     return summary, system + [summary] + recent
 
 

@@ -39,7 +39,7 @@ class SessionMeta:
         }
 
     @staticmethod
-    def from_json(data: dict) -> "SessionMeta":
+    def from_json(data: dict) -> SessionMeta:
         return SessionMeta(**{key: data.get(key, SessionMeta.__dataclass_fields__[key].default)
                               for key in SessionMeta.__dataclass_fields__})
 
@@ -121,7 +121,7 @@ class Session:
         self._dirty = False
 
     @staticmethod
-    def load(session_id: str) -> "Session":
+    def load(session_id: str) -> Session:
         path = daemon_home() / "sessions" / session_id
         if not (path / "meta.json").exists():
             raise SessionError(f"No session '{session_id}'")
