@@ -279,6 +279,25 @@ registry physically contains no write/shell/git tools, and its permission
 policy denies them even if a future refactor adds them. It uses the
 restrained **Archive** theme.
 
+## Token economy
+
+Every tool definition and every old turn is paid for on each request, so
+Daemon prunes both before sending — no extra API call, and the agent loop is
+unchanged:
+
+- **Context optimizer** — collapses duplicate tool results and, near the
+  budget, replaces older turns with a summary (`optimization.context`).
+- **Tool pruning** — advertises only the tools the task and this session's
+  usage make relevant, always keeping the read/edit/search/shell core
+  (`optimization.tools`). A pruned tool still executes if the model calls it.
+- **Failure-loop intervention** — when the same call fails three times with
+  the same error, the next request carries a short instruction to change
+  approach instead of retrying (`optimization.failure_detection`).
+
+Tool pruning and failure-loop intervention follow Microsoft's
+TokenEconomizer approach. Reported savings are estimates; provider-reported
+usage remains the billing source.
+
 ## Architecture
 
 ```

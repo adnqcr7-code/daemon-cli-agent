@@ -123,6 +123,33 @@ preserve_recent_turns = 4
 Token estimates guide budgeting only; provider-reported usage remains the
 source for measured token totals.
 
+Two more mechanisms shrink what is sent per request. Both are on by default
+and can be switched off independently:
+
+```toml
+[optimization.tools]
+enabled = true       # advertise only task-relevant tools
+min_score = 0.15     # keyword-overlap threshold for relevance
+max_tools = 20       # cap on advertised tools
+
+[optimization.failure_detection]
+enabled = true       # intervene when one call keeps failing
+max_failures = 3     # identical failures before a nudge
+window_turns = 10    # how long a failure pattern stays active
+```
+
+Tool pruning keeps the core loop (read/write/edit/search/shell/tests/git
+status, context and memory tools) and tools already used in the session.
+Pruning only changes what is *advertised*: a pruned tool still runs if the
+model calls it, so the capability is never removed.
+
+Failure-loop detection matches tool, normalized error and arguments. When the
+same call fails `max_failures` times, the next request gets one short
+instruction to change approach and try the tools that normally replace the
+failing one. The nudge names the tool and the count but never echoes tool
+output into the system prompt, and it never terminates a run or bypasses a
+permission decision.
+
 ## Optional language servers
 
 LSP integration is opt-in. Configure executable argument arrays in the
