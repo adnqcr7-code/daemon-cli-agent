@@ -12,7 +12,6 @@ from daemon.tools.lsp import (
     find_references,
 )
 
-
 _FAKE_SERVER = r'''
 import json
 import sys

@@ -1,11 +1,11 @@
 """Tests for the ContextOptimizer."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
-from daemon.agent.optimizer import ContextOptimizer, ContextOptimizationStats
+from daemon.agent.optimizer import ContextOptimizationStats, ContextOptimizer
 from daemon.config import Config
-from daemon.providers.types import Message, ToolSpec, ToolResult, ToolCall
+from daemon.providers.types import Message, ToolCall, ToolResult, ToolSpec
 
 
 def run_async(coro):
@@ -177,7 +177,6 @@ def test_preserve_system_messages():
         Message.user("Old turn 2"),
         Message.user("Recent turn"),
     ]
-    tools = [ToolSpec(name="t", description="d", parameters={})]
 
     optimized, removed = optimizer._truncate_old_turns(messages)
 
@@ -205,15 +204,16 @@ def test_truncate_old_turns_preserves_recent():
         Message.user("Recent 1"),
         Message.user("Recent 2"),
     ]
-    tools = [ToolSpec(name="t", description="d", parameters={})]
 
     optimized, removed = optimizer._truncate_old_turns(messages)
 
     assert removed == 3  # 3 old turns removed
     user_msgs = [m for m in optimized if m.role == "user"]
-    assert len(user_msgs) == 2
-    assert user_msgs[0].text == "Recent 1"
-    assert user_msgs[1].text == "Recent 2"
+    # A notice replaces the dropped turns so the loss is visible, not silent.
+    assert len(user_msgs) == 3
+    assert "dropped" in user_msgs[0].text
+    assert user_msgs[1].text == "Recent 1"
+    assert user_msgs[2].text == "Recent 2"
 
 
 def test_optimize_returns_stats():
@@ -261,28 +261,28 @@ def test_summarize_older_turns_uses_adapter():
         def __init__(self, items):
             self.items = items
             self.index = 0
-        
+
         def __aiter__(self):
             return self
-        
+
         async def __anext__(self):
             if self.index >= len(self.items):
                 raise StopAsyncIteration
             item = self.items[self.index]
             self.index += 1
             return item
-    
+
     class MockAdapter:
         def __init__(self):
             self.chat_calls = []
-        
+
         def chat(self, request):
             self.chat_calls.append(request)
             mock_event = MagicMock()
             mock_event.kind = "text"
             mock_event.text = "Summary of earlier conversation."
             return MockAsyncIterator([mock_event])
-    
+
     adapter = MockAdapter()
 
     messages = [
@@ -293,7 +293,6 @@ def test_summarize_older_turns_uses_adapter():
         Message.user("Recent 1"),
         Message.user("Recent 2"),
     ]
-    tools = [ToolSpec(name="t", description="d", parameters={})]
 
     optimized, summarized = run_async(optimizer._summarize_older_turns(
         messages, adapter, "test-model"
