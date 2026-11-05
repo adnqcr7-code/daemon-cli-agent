@@ -8,7 +8,6 @@ actual file editing and the actual pytest run inside the workspace.
 
 import asyncio
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -17,7 +16,6 @@ import pytest
 from click.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from mocks import OpenAICompatMock  # noqa: E402
 
 from daemon.cli import main as cli_main  # noqa: E402
 
@@ -67,8 +65,10 @@ def _invoke(runner, *args, expect_exit: int = 0):
 
 
 def test_version_and_help(runner):
+    from daemon import __version__
+
     result = _invoke(runner, "version")
-    assert "daemon 0.2.0" in result.output
+    assert f"daemon {__version__}" in result.output
     result = _invoke(runner, "--help")
     for command in ("auth", "models", "run", "plan", "review", "research",
                     "tools", "mcp", "agents", "sessions", "memory", "config",
