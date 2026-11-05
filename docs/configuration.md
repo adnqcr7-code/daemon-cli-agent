@@ -74,6 +74,11 @@ max_files = 20000
 [plugins]
 enabled = []                       # opt-in local plugin modules
 
+[verification]
+enabled = true                     # verify changed files before claiming done
+run_tests = true                   # also run the test runner (scoped to touched package)
+timeout_s = 300                    # per-check timeout; a failure is reported, never hidden
+
 [sessions]
 keep = 50
 
