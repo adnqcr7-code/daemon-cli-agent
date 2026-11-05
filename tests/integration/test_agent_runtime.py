@@ -8,7 +8,7 @@ from daemon.agent.session import Session, SessionMeta
 from daemon.checkpoints import CheckpointManager
 from daemon.memory import MemoryStore
 from daemon.models import RemoteModel
-from daemon.permissions import Effect, PermissionEngine
+from daemon.permissions import PermissionEngine
 from daemon.project import ProjectIndex
 from daemon.providers.catalog import ProviderDescriptor
 from daemon.providers.registry import AdapterRegistry
@@ -78,6 +78,26 @@ def test_full_engineering_cycle(mock_openai, workspace):
     assert result.tool_calls == 3
     assert result.files_changed == ["bug.py"]
     assert "1 passed" in result.text
+
+
+def test_verification_runs_after_edits(mock_openai, workspace):
+    """Enforced verification: after a turn that edits code, the result
+    must carry a verification outcome — the agent may not claim success
+    it did not check."""
+    mock_openai.stages = FIX_STAGES
+    runtime, adapter, session = _runtime(mock_openai, workspace,
+                                         assume_yes=True)
+
+    async def go():
+        return await runtime.run("Fix the failing test in this repository.")
+
+    result = asyncio.run(go())
+    asyncio.run(adapter.close())
+
+    assert result.files_changed == ["bug.py"]
+    assert result.verification, "verification must run when files changed"
+    assert "verification passed" in result.verification
+    assert "verification passed" in result.text
     # session persisted with the whole exchange
     assert len(session.messages) == 8  # user, a+t, tool, a+t, tool, a+t, tool, a
     assert session.usage.input_tokens == 1600
@@ -156,7 +176,7 @@ def test_hard_floor_blocks_dangerous_commands_even_when_approved(
     async def go():
         return await runtime.run("delete everything")
 
-    result = asyncio.run(go())
+    asyncio.run(go())
     asyncio.run(adapter.close())
     tool_message = next(m for m in session.messages if m.tool_results)
     assert tool_message.tool_results[0].is_error
@@ -243,7 +263,7 @@ def test_unknown_tool_reports_cleanly(mock_openai, workspace):
     async def go():
         return await runtime.run("try the tool")
 
-    result = asyncio.run(go())
+    asyncio.run(go())
     asyncio.run(adapter.close())
     tool_message = next(m for m in session.messages if m.tool_results)
     assert tool_message.tool_results[0].is_error

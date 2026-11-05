@@ -1,8 +1,6 @@
 """REPL smoke test: slash-command dispatch and startup wiring with a
 scripted input queue (no terminal needed)."""
 
-import asyncio
-from pathlib import Path
 
 import pytest
 

@@ -2,8 +2,6 @@
 
 import asyncio
 
-import pytest
-
 from daemon.config import Config
 from daemon.memory import MemoryStore
 from daemon.models import RemoteModel
@@ -103,7 +101,7 @@ def test_research_agent_cannot_invoke_write_tools(mock_openai, workspace,
     async def go():
         return await agent.ask("write pwned.txt")
 
-    result = asyncio.run(go())
+    asyncio.run(go())
     asyncio.run(adapter.close())
     assert not (workspace / "pwned.txt").exists()
     session = agent.session
