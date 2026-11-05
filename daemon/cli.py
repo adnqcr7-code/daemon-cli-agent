@@ -22,7 +22,7 @@ import click
 
 from . import __version__
 from .config import Config, daemon_home
-from .errors import AuthError, DaemonError
+from .errors import DaemonError
 from .log import get_logger, setup_logging
 from .security import redact
 
@@ -418,8 +418,8 @@ def run(task: str, model: str | None, profile: str | None, assume_yes: bool,
         if as_json:
             ui = AgentUI()  # silent: --json emits machine-readable output only
         else:
-            ui = renderer = _make_renderer(config,
-                                           plain=not sys.stdout.isatty())
+            ui = _make_renderer(config,
+                                plain=not sys.stdout.isatty())
         ctx.renderer = ui
         runtime = ctx.build_runtime(ui=ui)
         asyncio.run(attach_mcp_tools(ctx, renderer=ui))

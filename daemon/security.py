@@ -20,8 +20,8 @@ classifies and sanitizes.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
-from typing import Iterable
 
 from .errors import PathEscapeError
 
@@ -264,6 +264,34 @@ def scan_injection(text: str) -> list[tuple[str, str]]:
             if key not in seen:
                 seen.add(key)
                 findings.append((description, redact(snippet.strip())))
+    return findings
+
+
+def scan_injection_chunked(text: str, *, chunk_size: int = 30_000,
+                           overlap: int = 2_000) -> list[tuple[str, str]]:
+    """Scan ``text`` of any size for injection payloads.
+
+    The text is scanned in overlapping chunks so a payload sitting past
+    an arbitrary character limit (or straddling a chunk boundary) is still
+    caught, without ever holding a second full copy of the text. Small
+    inputs take the single-chunk fast path. Findings are de-duplicated by
+    (description, snippet) so overlapping chunks cannot double-report.
+    """
+    if len(text) <= chunk_size:
+        return scan_injection(text)
+    findings: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + chunk_size)
+        for description, snippet in scan_injection(text[start:end]):
+            key = (description, snippet)
+            if key not in seen:
+                seen.add(key)
+                findings.append((description, snippet))
+        if end >= len(text):
+            break
+        start = end - overlap
     return findings
 
 

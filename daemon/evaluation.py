@@ -11,7 +11,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 _PACKAGE_ROOT = Path(__file__).resolve().parent
 _REPO_ROOT = _PACKAGE_ROOT.parent
 _DEFAULT_TASKS = _PACKAGE_ROOT / "evals" / "tasks.json"
