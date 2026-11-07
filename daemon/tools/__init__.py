@@ -11,6 +11,7 @@ def register_builtin_tools(registry: ToolRegistry) -> ToolRegistry:
     from .codeintel import register_codeintel_tools
     from .fs import register_filesystem_tools
     from .git import register_git_tools
+
     from .misc import register_misc_tools
     from .shell import register_shell_tools
     from .web import register_web_tools
@@ -20,6 +21,7 @@ def register_builtin_tools(registry: ToolRegistry) -> ToolRegistry:
     register_git_tools(registry)
     register_codeintel_tools(registry)
     register_web_tools(registry)
+    register_design_tools(registry)
     register_misc_tools(registry)
     return registry
 

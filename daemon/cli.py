@@ -6,6 +6,7 @@ Commands:
   daemon auth ...            credentials (add/list/remove/test/switch/models)
   daemon models ...          model inspection and selection
   daemon run / plan / review / research
+  daemon design ... / build from <design-url>
   daemon tools / agents / mcp / sessions / memory / config
   daemon doctor              environment diagnostics
   daemon version
@@ -118,7 +119,8 @@ def main(ctx: click.Context, workspace: Path | None, model: str | None,
 
 def _launch_repl(*, workspace: Path | None, model: str | None, theme: str | None,
                  session_id: str | None, plain: bool,
-                 research: bool = False, check_updates: bool = False) -> None:
+                 research: bool = False, check_updates: bool = False,
+                 initial_prompt: str | None = None) -> None:
     from .context import build_context
     from .ui.repl import Repl, run_research_repl
 
@@ -153,7 +155,7 @@ def _launch_repl(*, workspace: Path | None, model: str | None, theme: str | None
         if research:
             run_research_repl(ctx, renderer)
         else:
-            Repl(ctx, renderer).start()
+            Repl(ctx, renderer, initial_prompt=initial_prompt).start()
     except DaemonError as exc:
         _fail(exc)
     finally:
@@ -633,6 +635,107 @@ def _run_research_one_shot(query: str, workspace: Path | None) -> None:
     finally:
         ctx.close()
     _echo(result.text or "(no findings)")
+
+
+# ---------------------------------------------------------------------------
+# design references (BITON) + build from a reference
+# ---------------------------------------------------------------------------
+
+
+@main.group()
+def design() -> None:
+    """Work with BITON design references."""
+
+
+@design.command("search")
+@click.argument("query", required=False)
+@click.option("--platform", type=click.Choice(("iOS", "Android", "Web",
+                                               "Desktop")), default=None)
+@click.option("--style", type=click.Choice(("Minimal", "Brutalist",
+                                            "Editorial", "Futuristic",
+                                            "Corporate", "Playful")),
+              default=None)
+@click.option("--category", default=None, help="e.g. 'Mobile Apps'")
+@click.option("--live", "live_only", is_flag=True,
+              help="Only designs with a hosted live demo")
+@click.option("--limit", type=int, default=10)
+@click.option("--refresh", is_flag=True, help="Bypass the cached catalogue")
+@click.option("--json", "as_json", is_flag=True)
+def design_search_cmd(query: str | None, platform: str | None,
+                      style: str | None, category: str | None,
+                      live_only: bool, limit: int, refresh: bool,
+                      as_json: bool) -> None:
+    """Search the BITON design library."""
+    from .designs import BitonClient
+
+    try:
+        matches = asyncio.run(BitonClient().search(
+            query or "", platform=platform, style=style, category=category,
+            live=True if live_only else None, limit=limit, refresh=refresh))
+    except DaemonError as exc:
+        _fail(exc)
+    if as_json:
+        click.echo(json.dumps([item.to_json() for item in matches], indent=2))
+        return
+    if not matches:
+        _echo("No design matched. Broaden the query or drop a filter.",
+              color="yellow")
+        return
+    for item in matches:
+        live = "  [live demo]" if item.live_url else ""
+        _echo(f"{item.slug}{live}", color="cyan")
+        _echo(f"    {item.title}")
+        _echo(f"    {item.summary_line()}")
+        _echo(f"    {item.url}")
+    _echo("read one in full: daemon design show <slug>")
+
+
+@design.command("show")
+@click.argument("reference")
+@click.option("--refresh", is_flag=True, help="Bypass the cached catalogue")
+@click.option("--json", "as_json", is_flag=True)
+def design_show(reference: str, refresh: bool, as_json: bool) -> None:
+    """Print the full spec and build brief of one design."""
+    from .designs import BitonClient, render_brief
+
+    try:
+        item = asyncio.run(BitonClient().get(reference, refresh=refresh))
+    except DaemonError as exc:
+        _fail(exc)
+    if as_json:
+        click.echo(json.dumps(item.to_json(), indent=2))
+        return
+    click.echo(render_brief(item))
+    _echo(f"build it: daemon build from {item.url}", color="cyan")
+
+
+@main.command("build")
+@click.argument("reference", nargs=-1, required=True)
+@click.option("--model", "-m", default=None, help="Model id for this session")
+@click.option("--theme", default=None, help="Terminal theme")
+@click.option("--plain", is_flag=True, help="Plain (uncoloured) output")
+@_workspace_option
+def build(reference: tuple[str, ...], model: str | None, theme: str | None,
+          plain: bool, workspace: Path | None) -> None:
+    """Build from a design reference: daemon build from <biton-url-or-slug>."""
+    from .designs import BitonClient, render_brief
+
+    parts = list(reference)
+    if len(parts) == 2 and parts[0].lower() == "from":
+        ref = parts[1]
+    elif len(parts) == 1:
+        ref = parts[0]
+    else:
+        raise click.UsageError("Usage: daemon build from <biton-url-or-slug>")
+    try:
+        item = asyncio.run(BitonClient().get(ref))
+    except DaemonError as exc:
+        _fail(exc)
+    click.echo(render_brief(item))
+    _echo("")
+    _launch_repl(workspace=workspace, model=model, theme=theme,
+                 session_id=None, plain=plain,
+                 initial_prompt=item.build_task())
 
 
 # ---------------------------------------------------------------------------

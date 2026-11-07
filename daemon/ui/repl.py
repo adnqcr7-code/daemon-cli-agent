@@ -36,6 +36,7 @@ SLASH_COMMANDS = {
     "/permissions": "show effective permission rules",
     "/plan": "create an implementation plan: /plan <goal>",
     "/build": "execute plan tasks (or run a message)",
+    "/design": "build from a BITON design reference: /design <slug or url>",
     "/review": "spawn the reviewer subagent on the current diff",
     "/debug": "spawn the debugger subagent: /debug <symptom>",
     "/research": "spawn the restricted research subagent: /research <query>",
@@ -58,12 +59,14 @@ SLASH_COMMANDS = {
 
 
 class Repl:
-    def __init__(self, ctx: DaemonContext, renderer: Renderer) -> None:
+    def __init__(self, ctx: DaemonContext, renderer: Renderer,
+                 initial_prompt: str | None = None) -> None:
         self.ctx = ctx
         self.renderer = renderer
         self.tracker = TaskTracker()
         self.skills = skill_loader(ctx)
         self._attached_skills: list = []
+        self.initial_prompt = initial_prompt
         self._loop = asyncio.new_event_loop()
         self.runtime = ctx.build_runtime(ui=renderer,
                                          extra_context=self._context_chain)
@@ -75,6 +78,9 @@ class Repl:
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._startup())
+            if self.initial_prompt:
+                prompt, self.initial_prompt = self.initial_prompt, None
+                self._turn(prompt)
             while True:
                 try:
                     line = self._read_line()
@@ -287,6 +293,20 @@ class Repl:
 
     def _cmd_tools(self, rest: str) -> bool:
         self.renderer.tools_table(self.ctx.registry.tools())
+        return False
+
+    def _cmd_design(self, rest: str) -> bool:
+        if not rest:
+            self.renderer.line(
+                "muted", "usage: /design <slug|biton design url> "
+                         "(find one with design_search)")
+            return False
+        from ..designs import BitonClient
+
+        design = self._loop.run_until_complete(BitonClient().get(rest))
+        self.renderer.line("accent", f"reference: {design.title}")
+        self.renderer.line("muted", design.summary_line())
+        self._turn(design.build_task())
         return False
 
     def _cmd_permissions(self, rest: str) -> bool:

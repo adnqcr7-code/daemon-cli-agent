@@ -29,16 +29,10 @@ from ..providers.types import (
 )
 from ..security import scan_injection_chunked
 from ..tools import ToolContext, ToolOutput, ToolRegistry
-from .context import (
-    compact_conversation,
-    context_budget,
-    estimate_tokens,
-    should_compact,
-    truncate_tool_output,
-)
-from .optimizer import ContextOptimizer
+
 from .prompts import build_system_prompt
 from .session import Session
+from .tool_selector import ToolSelector
 
 _logger = get_logger("agent")
 
@@ -138,6 +132,11 @@ class AgentRuntime:
         # Optimization engine
         self.optimizer = ContextOptimizer(config) if config and config.get("optimization.enabled") else None
         self._optimization_enabled = config.get("optimization.enabled", True) if config else True
+        self.tool_selector = ToolSelector(config)
+        self.failure_detector = FailureLoopDetector(config)
+        self._current_task = ""
+        self._tool_prune_reported = False
+        self._failure_nudge: str | None = None
 
     # ------------------------------------------------------------------ run
 
@@ -147,14 +146,16 @@ class AgentRuntime:
         started = time.perf_counter()
         self._active_result = result
         self.session.add_user(user_text)
+        self._current_task = user_text
+        self._tool_prune_reported = False
         max_turns = self.config.max_turns() if self.config else 40
         try:
             for step in range(1, max_turns + 1):
                 result.steps = step
-                await self._maybe_compact()
+                tool_specs = self._tool_specs()
+                await self._maybe_compact(tool_specs)
                 if self.optimizer and self._optimization_enabled:
-                    from ..providers.types import ToolSpec
-                    tool_specs = [ToolSpec(**spec) for spec in self.registry.specs()]
+
                     self.session.messages, opt_stats = await self.optimizer.optimize(
                         self.session.messages,
                         tool_specs,
@@ -168,6 +169,14 @@ class AgentRuntime:
                             f"Context optimized: saved ~{opt_stats.tokens_saved} tokens "
                             f"({opt_stats.original_tokens} -> {opt_stats.optimized_tokens})",
                             level="debug")
+                selection = self.tool_selector.last_stats
+                if not self._tool_prune_reported and selection.tokens_saved > 0:
+                    self._tool_prune_reported = True
+                    await self.ui.notice(
+                        f"Tools pruned: advertising {selection.selected_count} of "
+                        f"{selection.original_count} (saves ~"
+                        f"{selection.tokens_saved} tokens per request).",
+                        level="debug")
                 text, calls, usage = await self._stream_once()
                 if usage is not None:
                     await self._record_usage(usage, result)
@@ -177,6 +186,7 @@ class AgentRuntime:
                     break
                 results = await self._execute_calls(calls, result)
                 self.session.add_tool_results(results)
+                await self._check_failure_loop()
             else:
                 result.text = (result.text or
                                "Stopped: reached the maximum number of agent "
@@ -221,17 +231,18 @@ class AgentRuntime:
             full_text = ""
         return full_text, tool_calls, usage
 
-    def _build_request(self) -> ChatRequest:
-        from ..providers.types import ToolSpec
 
-        specs = [ToolSpec(**spec) for spec in self.registry.specs()]
-        return ChatRequest(
+
+    def _build_request(self) -> ChatRequest:
+        request = ChatRequest(
             model=self.model.model_id,
-            messages=_messages_for_model(list(self.session.messages)),
-            tools=specs,
+
             system=self.system_prompt(),
             stream=True,
         )
+        # A failure-loop nudge is delivered once, on the next request only.
+        self._failure_nudge = None
+        return request
 
     # ------------------------------------------------------------- execution
 
@@ -299,10 +310,15 @@ class AgentRuntime:
                        f"{'; '.join(decision.reasons) or 'user declined'}. "
                        f"Adjust the plan or ask the user.")
             await self.ui.notice(f"Denied {decision.summary}", level="warn")
+            self.failure_detector.record(call.name, call.arguments, message,
+                                         is_error=True)
             return ToolResult(tool_call_id=call.id, tool_name=call.name,
                               content=message, is_error=True)
         output = await self.registry.execute(call.name, call.arguments,
                                              self.tool_ctx)
+        self.tool_selector.record_use(call.name)
+        self.failure_detector.record(call.name, call.arguments, output.content,
+                                     is_error=output.is_error)
         if not output.is_error and call.name in _FILE_TOOLS:
             path = output.metadata.get("path")
             if path and path not in result.files_changed:
@@ -397,18 +413,24 @@ class AgentRuntime:
     async def _on_tool_event(self, event) -> None:
         await self.ui.tool_line(event.tool, event.line)
 
+    async def _check_failure_loop(self) -> None:
+        """Surface a repeated failing call as guidance for the next step."""
+        report = self.failure_detector.analyze()
+        if not report.detected or not report.recommendation:
+            return
+        self._failure_nudge = report.recommendation
+        await self.ui.notice(report.recommendation, level="warn")
+
     # ----------------------------------------------------------- compaction
 
-    async def _maybe_compact(self) -> None:
+    async def _maybe_compact(self, tools: list | None = None) -> None:
         """Compact if needed, but skip if optimizer already summarized."""
         # Skip if optimizer recently summarized (session.meta.compacted tracks this)
         if self.session.meta.compacted:
             self.session.meta.compacted = False  # reset for next check
             return
-        specs = self.registry.specs()
-        from ..providers.types import ToolSpec
-
-        tools = [ToolSpec(**spec) for spec in specs]
+        if tools is None:
+            tools = self._tool_specs()
         if not should_compact(self.session.messages, tools,
                               self.model.capabilities.context_window,
                               threshold=float(
@@ -538,6 +560,9 @@ class AgentRuntime:
                 "When it approaches 70%, use the compact_context tool to "
                 "summarize older history while retaining task-critical facts."
             )
+        if self._failure_nudge:
+            prompt += ("\n\nFailure-loop intervention:\n"
+                       + self._failure_nudge)
         return prompt
 
 

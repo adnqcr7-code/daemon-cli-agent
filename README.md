@@ -47,6 +47,7 @@ changed: bug.py
 | **Reliability over demos** | Every mutating action is checkpointed (`/undo`), tool output is fenced as untrusted data, secrets are redacted everywhere, failures are reported — never hidden. |
 | **Separate Research agent** | A deliberately smaller, read-only, citation-driven research agent with its own theme (`Archive`) and its own policy. |
 | **First-class MCP** | Real Model Context Protocol client over stdio and Streamable HTTP, with untrusted-by-default server review. |
+| **Design references** | `daemon build from <design-url>` reads a documented BITON study (palette, type, spacing, components, flow) and builds to that spec. |
 | **Terminal-native** | No web UI, no Electron. Four themes, `NO_COLOR` support, non-interactive mode for scripting and CI. |
 
 ## Quick start
@@ -242,6 +243,8 @@ daemon eval --target …     run repository task evaluations across models
 daemon plan "goal"         create an implementation plan (--execute to run it)
 daemon review              reviewer subagent over the current diff
 daemon research            the restricted Research agent (REPL or one-shot)
+daemon design …            search / show documented BITON design studies
+daemon build from <ref>    build an interface from a design reference
 daemon auth …              add / list / remove / test / switch / models
 daemon models …            list / recommend / set
 daemon mcp …               add / list / remove / test / enable / disable
@@ -277,6 +280,25 @@ comparison, durable notes. It is restricted *by construction*: its tool
 registry physically contains no write/shell/git tools, and its permission
 policy denies them even if a future refactor adds them. It uses the
 restrained **Archive** theme.
+
+## Token economy
+
+Every tool definition and every old turn is paid for on each request, so
+Daemon prunes both before sending — no extra API call, and the agent loop is
+unchanged:
+
+- **Context optimizer** — collapses duplicate tool results and, near the
+  budget, replaces older turns with a summary (`optimization.context`).
+- **Tool pruning** — advertises only the tools the task and this session's
+  usage make relevant, always keeping the read/edit/search/shell core
+  (`optimization.tools`). A pruned tool still executes if the model calls it.
+- **Failure-loop intervention** — when the same call fails three times with
+  the same error, the next request carries a short instruction to change
+  approach instead of retrying (`optimization.failure_detection`).
+
+Tool pruning and failure-loop intervention follow Microsoft's
+TokenEconomizer approach. Reported savings are estimates; provider-reported
+usage remains the billing source.
 
 ## Architecture
 
@@ -359,6 +381,7 @@ file content and an optional verification command.
 - [Configuration](docs/configuration.md)
 - [Providers](docs/providers.md) · [Authentication & key detection](docs/authentication.md)
 - [Permissions & security](docs/security.md)
+- [Design references](docs/designs.md)
 - [MCP integration](docs/mcp.md)
 - [Tool development](docs/tool-development.md) · [Agent development](docs/agent-development.md)
 - [Troubleshooting](docs/troubleshooting.md)
