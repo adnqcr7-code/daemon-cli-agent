@@ -29,7 +29,13 @@ from ..providers.types import (
 )
 from ..security import scan_injection_chunked
 from ..tools import ToolContext, ToolOutput, ToolRegistry
-from .context import compact_conversation, should_compact
+from .context import (
+    compact_conversation,
+    context_budget,
+    estimate_tokens,
+    should_compact,
+    truncate_tool_output,
+)
 from .optimizer import ContextOptimizer
 from .prompts import build_system_prompt
 from .session import Session
@@ -329,10 +335,21 @@ class AgentRuntime:
         # 500k backstop guards against a pathological tool flooding memory;
         # every other tool already bounds its own output well below this.
         content = output.content
-        if len(content) > _MAX_TOOL_OUTPUT_CHARS:
-            content = (content[:_MAX_TOOL_OUTPUT_CHARS]
-                       + "\n[... output truncated by daemon: exceeded "
-                       f"{_MAX_TOOL_OUTPUT_CHARS} characters ...]\n")
+        output_budget = _MAX_TOOL_OUTPUT_CHARS
+        model = getattr(self, "model", None)
+        if model is not None:
+            available_tokens = (
+                context_budget(model.capabilities.context_window)
+                - self.context_tokens()
+                - estimate_tokens(self.system_prompt())
+                - 1024
+            )
+            output_budget = min(
+                output_budget,
+                max(1_000, available_tokens * 3),
+            )
+        if len(content) > output_budget:
+            content = truncate_tool_output(content, max_chars=output_budget)
         findings = scan_injection_chunked(content)
         prefix = ""
         if findings:

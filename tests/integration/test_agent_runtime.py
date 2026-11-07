@@ -13,7 +13,7 @@ from daemon.project import ProjectIndex
 from daemon.providers.catalog import ProviderDescriptor
 from daemon.providers.registry import AdapterRegistry
 from daemon.providers.types import Message, ModelCapabilities
-from daemon.tools import default_registry
+from daemon.tools import ToolOutput, default_registry
 
 FIX_STAGES = [
     {"tool_calls": [{"name": "read_file", "arguments": {"path": "bug.py"}}],
@@ -132,6 +132,22 @@ def test_permission_denial_reaches_the_model(mock_openai, workspace):
     tool_message = next(m for m in session.messages if m.tool_results)
     assert tool_message.tool_results[0].is_error
     assert "Permission denied" in tool_message.tool_results[0].content
+
+
+def test_tool_output_budget_respects_model_context_window(mock_openai, workspace):
+    runtime, adapter, _ = _runtime(mock_openai, workspace)
+    runtime.model.capabilities.context_window = 4_096
+
+    fenced = runtime._fence(
+        "run_command",
+        ToolOutput(content="HEAD" + "x" * 10_000 + "TAIL"),
+    )
+    asyncio.run(adapter.close())
+
+    assert len(fenced) < 10_000
+    assert "HEAD" in fenced
+    assert "TAIL" in fenced
+    assert "middle truncated" in fenced
 
 
 def test_model_can_compact_context_with_tool(mock_openai, workspace):

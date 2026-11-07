@@ -1,5 +1,7 @@
 # Daemon
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/adnqcr7-code-daemon-cli-agent-1x875n?v=2150a3625d7b0fd5ae6d622c21735f50)](https://m8ven.ai/mcp/adnqcr7-code-daemon-cli-agent-1x875n?s=readme)
+
 **An open-source, provider-agnostic AI engineering agent that lives in your terminal.**
 
 Daemon is not a chatbot wrapper. It is an autonomous engineering agent that

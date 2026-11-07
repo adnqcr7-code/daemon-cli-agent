@@ -12,6 +12,7 @@ import asyncio
 import os
 import signal
 import sys
+from collections import deque
 from pathlib import Path
 
 from ..errors import ToolError
@@ -19,6 +20,8 @@ from ..security import resolve_in_root, strip_secret_env
 from .base import Tool, ToolContext, ToolOutput
 
 _MAX_OUTPUT_CHARS = 100_000
+_MAX_LIVE_OUTPUT_LINES = 100
+_MAX_LIVE_LINE_CHARS = 500
 _WINDOWS_SHELLS = (("pwsh", "-NoProfile", "-Command"),
                    ("powershell", "-NoProfile", "-Command"))
 
@@ -51,6 +54,8 @@ async def run_shell(
     """Run a command; returns (exit_code, output, timed_out).
 
     Shared by the shell tool, the test runner, formatters and doctor.
+    Retained output is bounded, but oversized output is drained to completion
+    rather than killing a useful command. Live output is capped separately.
     """
     argv = shell_argv() + [command]
     env = strip_secret_env(None)
@@ -65,27 +70,49 @@ async def run_shell(
         start_new_session=(not sys.platform.startswith("win")),
     )
     collected: list[str] = []
+    tail_parts: deque[str] = deque()
+    tail_size = 0
     size = 0
-    truncated = False
+    total_size = 0
+    total_lines = 0
+    live_output_abbreviated = False
 
     async def _pump() -> None:
-        nonlocal size, truncated
+        nonlocal size, total_size, total_lines, tail_size
+        nonlocal live_output_abbreviated
         assert process.stdout is not None
         async for raw in process.stdout:
             line = raw.decode("utf-8", errors="replace").rstrip("\n")
-            if size + len(line) > _MAX_OUTPUT_CHARS:
-                remainder = _MAX_OUTPUT_CHARS - size
-                if remainder > 0:
-                    collected.append(line[:remainder])
-                    size += remainder
-                truncated = True
-                break
-            collected.append(line)
-            size += len(line) + 1
+            chunk = line + "\n"
+            total_lines += 1
+            total_size += len(chunk)
+            if size < _MAX_OUTPUT_CHARS:
+                retained = chunk[:_MAX_OUTPUT_CHARS - size]
+                collected.append(retained)
+                size += len(retained)
+            tail_limit = max(1, _MAX_OUTPUT_CHARS // 5)
+            tail_chunk = chunk[-tail_limit:]
+            tail_parts.append(tail_chunk)
+            tail_size += len(tail_chunk)
+            while tail_size > tail_limit:
+                excess = tail_size - tail_limit
+                first = tail_parts.popleft()
+                if len(first) > excess:
+                    tail_parts.appendleft(first[excess:])
+                    tail_size -= excess
+                else:
+                    tail_size -= len(first)
             if on_line is not None:
-                await on_line(line)
-        if truncated:
-            _kill(process)
+                if total_lines <= _MAX_LIVE_OUTPUT_LINES:
+                    preview = line[:_MAX_LIVE_LINE_CHARS]
+                    if len(line) > _MAX_LIVE_LINE_CHARS:
+                        preview += " [... line abbreviated]"
+                    await on_line(preview)
+                elif not live_output_abbreviated:
+                    await on_line(
+                        f"[live output abbreviated after "
+                        f"{_MAX_LIVE_OUTPUT_LINES} lines; command continues]")
+                    live_output_abbreviated = True
 
     timed_out = False
     try:
@@ -97,9 +124,20 @@ async def run_shell(
     finally:
         if not pump.done():
             await asyncio.wait_for(asyncio.shield(pump), 5)
-    output = "\n".join(collected)
+    output = "".join(collected)
+    truncated = total_size > _MAX_OUTPUT_CHARS
     if truncated:
-        output += "\n[output truncated]"
+        head_limit = int(_MAX_OUTPUT_CHARS * 0.7)
+        head = output[:head_limit]
+        tail = "".join(tail_parts)
+        omitted_chars = max(0, total_size - len(head) - len(tail))
+        omitted_lines = max(0, total_lines - head.count("\n") - tail.count("\n"))
+        output = (
+            head
+            + f"\n[... {omitted_chars} characters across approximately "
+            f"{omitted_lines} lines omitted; command completed ...]\n"
+            + tail
+        )
     if timed_out:
         output += f"\n[command timed out after {int(timeout_s)}s and was killed]"
     exit_code = process.returncode if process.returncode is not None else -1
