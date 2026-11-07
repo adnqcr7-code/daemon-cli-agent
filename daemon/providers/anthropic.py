@@ -7,12 +7,11 @@ extended thinking passthrough, SSE streaming) and ``GET /v1/models``.
 from __future__ import annotations
 
 import json
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from ..errors import ProviderError
 from ..log import get_logger
 from .base import ProviderAdapter
-from .catalog import ProviderDescriptor
 from .types import (
     ChatRequest,
     Message,

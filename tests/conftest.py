@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -31,7 +30,7 @@ def _isolate_daemon_home(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def clean_globals():
     """Reset process-global state around every test."""
-    from daemon.security import SecretRedactor, _GLOBAL_REDACTOR
+    from daemon.security import _GLOBAL_REDACTOR
 
     saved_known = set(_GLOBAL_REDACTOR._known)
     yield

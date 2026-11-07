@@ -16,8 +16,8 @@ from ..errors import DaemonError
 from ..log import audit, get_logger
 from ..models import RemoteModel
 from ..permissions import PermissionEngine
-from ..providers.types import Message, Usage
-from ..tools import ToolRegistry, read_only_registry, default_registry
+from ..providers.types import Usage
+from ..tools import ToolRegistry, default_registry, read_only_registry
 from .prompts import subagent_role
 from .runtime import AgentRuntime, AgentUI
 from .session import Session, SessionMeta

@@ -221,7 +221,7 @@ class FindSymbolsTool(Tool):
         if not results:
             note = f"\n[LSP unavailable: {lsp_error}; used fallback analysis]" if lsp_error else ""
             return ToolOutput(content="No symbols found." + note)
-        truncated = "" if len(results) <= 400 else f"\n[truncated at 400 symbols]"
+        truncated = "" if len(results) <= 400 else "\n[truncated at 400 symbols]"
         fallback_note = (
             f"\n[LSP unavailable: {lsp_error}; used fallback analysis]"
             if lsp_error and method != "language server" else "")

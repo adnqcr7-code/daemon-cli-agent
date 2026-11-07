@@ -1,9 +1,7 @@
 """Themes, skills, planner parsing and session persistence."""
 
-import asyncio
 
 from daemon.skills import SkillLibrary
-
 
 # ------------------------------------------------------------- themes
 

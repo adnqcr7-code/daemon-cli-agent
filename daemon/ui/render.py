@@ -18,7 +18,6 @@ from rich.table import Table
 from rich.text import Text
 
 from ..agent.runtime import AgentUI
-from ..models import estimate_cost_usd
 from ..permissions import Decision
 from ..providers.types import RemoteModel, Usage
 from ..security import redact

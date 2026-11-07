@@ -7,8 +7,6 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import pytest
-
 from daemon.errors import McpError
 from daemon.mcp import (
     MCPClient,
@@ -307,11 +305,9 @@ def test_parse_resource_metadata_header():
 
 
 def test_discover_oauth_endpoints_parses_metadata():
-    import http.server
 
     class OAuthMock(_HttpMcpMock):
         def __init__(self):
-            outer = self
 
             class Handler(BaseHTTPRequestHandler):
                 def log_message(self, *args):

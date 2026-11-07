@@ -91,7 +91,7 @@ async def run_shell(
     try:
         pump = asyncio.create_task(_pump())
         await asyncio.wait_for(asyncio.shield(_wait(process)), timeout_s)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         timed_out = True
         _kill(process)
     finally:

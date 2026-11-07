@@ -5,16 +5,14 @@ These are the tests that back the security claims in the docs.
 
 import asyncio
 import json
-import os
 from pathlib import Path
 
 import pytest
 
-from daemon.permissions import Effect, PermissionEngine, Rule
-from daemon.security import classify_command, redact, redactor, scan_injection
+from daemon.permissions import Effect, PermissionEngine
+from daemon.security import redactor, scan_injection
 from daemon.tools import ToolContext, ToolRegistry
 from daemon.tools.fs import register_filesystem_tools
-
 
 # ---------------------------------------------------------------------------
 # Path traversal and containment

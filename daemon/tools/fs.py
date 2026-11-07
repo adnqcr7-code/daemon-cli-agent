@@ -76,13 +76,18 @@ def _read_text_bounded(path: Path, *, offset: int = 0, limit: int | None = None,
 
 
 async def _checkpoint(ctx: ToolContext, *paths: Path) -> None:
-    """Snapshot existing files; brand-new files need no checkpoint (their
-    undo is simply deletion by the user or delete_path)."""
+    """Snapshot existing files; record not-yet-existing ones as creations.
+
+    A path that does not exist yet is about to be created by the caller —
+    recording it lets /undo delete it again. Without this, undo could
+    restore edits but never remove a file the agent created.
+    """
     if ctx.checkpoints is None:
         return
     existing = [path for path in paths if path.exists() and path.is_file()]
-    if existing:
-        await ctx.checkpoints.create(existing)
+    created = [path for path in paths if not path.exists()]
+    if existing or created:
+        await ctx.checkpoints.create(existing, created=created)
 
 
 class ReadFileTool(Tool):
@@ -121,7 +126,7 @@ class ReadFileTool(Tool):
         header = (f"[{rel} | lines {offset + 1}-{offset + shown_lines} "
                   f"of {total}]\n")
         if truncated:
-            header += f"[truncated - use offset/limit to read more]\n"
+            header += "[truncated - use offset/limit to read more]\n"
         return ToolOutput(content=header + content,
                           metadata={"path": rel, "total_lines": total})
 
@@ -491,7 +496,7 @@ class SearchFilesTool(Tool):
 
         hits = await asyncio.to_thread(_search)
         if not hits:
-            return ToolOutput(content=f"No matches for pattern.")
+            return ToolOutput(content="No matches for pattern.")
         body = "\n".join(f"{file}:{line}: {text}" for file, line, text in hits)
         capped = "" if len(hits) < max_results else \
             f"\n[stopped at {max_results} matches]"

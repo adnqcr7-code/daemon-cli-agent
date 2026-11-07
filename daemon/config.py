@@ -16,10 +16,9 @@ import copy
 import os
 import re
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any
-
-import tomllib
 
 from .errors import ConfigError
 
@@ -68,6 +67,15 @@ DEFAULTS: dict[str, Any] = {
         "rules": [],
         # Only honoured when the user passes --assume-yes explicitly.
         "assume_yes": False,
+    },
+    "verification": {
+        # After an agent turn that changed files, verify before reporting
+        # done: byte-compile changed Python files, then run the project's
+        # test runner scoped to the touched package. A failure is reported,
+        # never silently ignored; set enabled=false to opt out.
+        "enabled": True,
+        "run_tests": True,
+        "timeout_s": 300,
     },
     "research": {
         "search_backend": "duckduckgo",
@@ -167,7 +175,7 @@ class Config:
     # -- construction ------------------------------------------------------
 
     @classmethod
-    def load(cls, workspace: Path | str | None = None) -> "Config":
+    def load(cls, workspace: Path | str | None = None) -> Config:
         home = daemon_home()
         user_path = home / "config.toml"
         project_path = None

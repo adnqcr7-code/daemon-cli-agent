@@ -1,6 +1,6 @@
 """Terminal UI: themes, renderer, REPL."""
 
-from .themes import Theme, get_theme, resolve_theme, themes
 from .render import Renderer
+from .themes import Theme, get_theme, resolve_theme, themes
 
 __all__ = ["Theme", "get_theme", "resolve_theme", "themes", "Renderer"]

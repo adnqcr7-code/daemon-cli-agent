@@ -81,3 +81,64 @@ def test_prune_keeps_window(workspace):
         assert len(checkpoints) <= 4  # keep*2 window
 
     asyncio.run(go())
+
+
+def test_undo_deletes_files_created_after_checkpoint(workspace):
+    """Regression: /undo used to restore edits but leave created files."""
+    async def go():
+        manager = CheckpointManager(workspace)
+        new_file = workspace / "brand-new.txt"
+        checkpoint = await manager.create([], created=[new_file])
+        new_file.write_text("created by the agent")
+        report = await manager.restore_report(checkpoint.id)
+        assert report.restored == 0
+        assert report.deleted == 1
+        assert report.deleted_paths == ["brand-new.txt"]
+        assert not new_file.exists()
+
+    asyncio.run(go())
+
+
+def test_undo_restores_edited_and_deletes_created(workspace):
+    async def go():
+        manager = CheckpointManager(workspace)
+        (workspace / "old.txt").write_text("before")
+        new_file = workspace / "new.txt"
+        checkpoint = await manager.create(
+            [workspace / "old.txt"], created=[new_file])
+        (workspace / "old.txt").write_text("after")
+        new_file.write_text("created")
+        restored = await manager.restore(checkpoint.id)
+        assert restored == 1
+        assert (workspace / "old.txt").read_text() == "before"
+        assert not new_file.exists()
+
+    asyncio.run(go())
+
+
+def test_created_file_outside_workspace_is_never_tracked(workspace, tmp_path):
+    async def go():
+        manager = CheckpointManager(workspace)
+        (workspace / "inside.txt").write_text("v")
+        outside = tmp_path / "outside.txt"
+        checkpoint = await manager.create(
+            [workspace / "inside.txt"], created=[outside])
+        outside.write_text("do not touch")
+        report = await manager.restore_report(checkpoint.id)
+        assert report.deleted == 0
+        assert outside.read_text() == "do not touch"
+
+    asyncio.run(go())
+
+
+def test_latest_lists_created_files(workspace):
+    async def go():
+        manager = CheckpointManager(workspace)
+        new_file = workspace / "listed.txt"
+        await manager.create([], created=[new_file])
+        latest = manager.latest()
+        assert latest is not None
+        assert latest.created_files == ["listed.txt"]
+        assert "created.json" not in latest.files
+
+    asyncio.run(go())

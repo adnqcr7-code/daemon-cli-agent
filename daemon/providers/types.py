@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -68,20 +67,20 @@ class Message:
     tool_results: list[ToolResult] = field(default_factory=list)
 
     @staticmethod
-    def system(text: str) -> "Message":
+    def system(text: str) -> Message:
         return Message(role="system", text=text)
 
     @staticmethod
-    def user(text: str) -> "Message":
+    def user(text: str) -> Message:
         return Message(role="user", text=text)
 
     @staticmethod
     def assistant(text: str | None = None,
-                  tool_calls: list[ToolCall] | None = None) -> "Message":
+                  tool_calls: list[ToolCall] | None = None) -> Message:
         return Message(role="assistant", text=text, tool_calls=tool_calls or [])
 
     @staticmethod
-    def with_tool_results(results: list[ToolResult]) -> "Message":
+    def with_tool_results(results: list[ToolResult]) -> Message:
         return Message(role="user", tool_results=results)
 
     def to_json(self) -> dict[str, Any]:
@@ -100,7 +99,7 @@ class Message:
         }
 
     @staticmethod
-    def from_json(data: dict[str, Any]) -> "Message":
+    def from_json(data: dict[str, Any]) -> Message:
         return Message(
             role=data["role"],
             text=data.get("text"),
@@ -142,7 +141,7 @@ class Usage:
     output_tokens: int = 0
     extra: dict[str, int] = field(default_factory=dict)
 
-    def add(self, other: "Usage") -> None:
+    def add(self, other: Usage) -> None:
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
         for key, value in other.extra.items():
@@ -205,7 +204,7 @@ class ModelCapabilities:
         }
 
     @staticmethod
-    def from_json(data: dict[str, Any]) -> "ModelCapabilities":
+    def from_json(data: dict[str, Any]) -> ModelCapabilities:
         return ModelCapabilities(**{
             key: data.get(key) for key in (
                 "context_window", "tool_calling", "vision", "reasoning",
@@ -237,7 +236,7 @@ class RemoteModel:
         }
 
     @staticmethod
-    def from_json(data: dict[str, Any]) -> "RemoteModel":
+    def from_json(data: dict[str, Any]) -> RemoteModel:
         return RemoteModel(
             model_id=data["model_id"],
             provider=data["provider"],

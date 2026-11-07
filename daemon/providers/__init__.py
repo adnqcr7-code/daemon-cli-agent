@@ -1,5 +1,8 @@
 """Provider layer: adapters, protocol implementations, key detection."""
 
+from .base import ProviderAdapter
+from .catalog import PROVIDERS, ProviderDescriptor, iter_providers, provider_by_id
+from .registry import AdapterRegistry
 from .types import (
     ChatRequest,
     Message,
@@ -11,9 +14,6 @@ from .types import (
     ToolSpec,
     Usage,
 )
-from .catalog import PROVIDERS, ProviderDescriptor, provider_by_id, iter_providers
-from .base import ProviderAdapter
-from .registry import AdapterRegistry
 
 __all__ = [
     "ChatRequest", "Message", "ModelCapabilities", "RemoteModel", "StreamEvent",

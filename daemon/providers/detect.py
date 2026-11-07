@@ -16,7 +16,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from .catalog import PROVIDERS, provider_by_id, providers_by_prefix
+from .catalog import PROVIDERS, providers_by_prefix
 
 
 @dataclass

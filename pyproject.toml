@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "daemon-agent"
-version = "0.2.0"
+version = "0.2.1"
 description = "Daemon - an open-source, provider-agnostic AI engineering agent that lives in your terminal."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -54,7 +54,9 @@ Changelog = "https://github.com/adnqcr7-code/daemon-cli-agent/blob/main/CHANGELO
 keyring = ["keyring>=24.0"]
 crypto = ["cryptography>=42.0"]
 repl = ["prompt_toolkit>=3.0.0"]
-dev = ["pytest>=8.0", "requests>=2.31.0"]
+# dev includes cryptography + ruff: without cryptography the vault/e2e
+# tests fail on a fresh clone (the encrypted backend has no backend).
+dev = ["pytest>=8.0", "requests>=2.31.0", "cryptography>=42.0", "ruff>=0.4.0"]
 
 [project.scripts]
 daemon = "daemon.cli:main"
@@ -68,3 +70,15 @@ daemon = ["evals/**/*.json", "evals/**/*.py", "evals/**/*.toml"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+# E501: long lines are tolerated; keep diffs readable instead.
+# UP042: Effect must stay `class Effect(str, Enum)` — StrEnum would change
+# str(Effect.ALLOW) from "Effect.ALLOW" to "allow" (audit/log output).
+ignore = ["E501", "UP042"]
+

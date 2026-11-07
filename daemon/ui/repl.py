@@ -9,26 +9,20 @@ turn cleanly (checkpoints and session state survive), Ctrl+D exits.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 from ..agent.orchestration import Orchestrator, SubagentSpec
 from ..agent.planner import TaskTracker, parse_plan
 from ..agent.prompts import planner_prompt, subagent_roles
 from ..agent.session import Session, SessionMeta
-from ..agent.runtime import AgentRuntime
-from ..config import Config
 from ..context import DaemonContext, attach_mcp_tools, skill_loader
-from ..errors import DaemonError, Interrupted
+from ..errors import DaemonError
 from ..log import describe_exception, get_logger
-from ..models import ModelRegistry
-from ..permissions import Effect
-from ..providers.registry import AdapterRegistry, custom_descriptor
-from ..providers.catalog import provider_by_id
 from ..providers.types import ChatRequest, Message
 from ..research import ResearchAgent
 from ..tools.git import git as git_run
 from .render import Renderer
-from .themes import ARCHIVE, get_theme, themes as all_themes
+from .themes import ARCHIVE, get_theme
+from .themes import themes as all_themes
 
 _logger = get_logger("repl")
 
@@ -505,14 +499,21 @@ class Repl:
         if latest is None:
             self.renderer.line("muted", "no checkpoints to undo")
             return False
-        answer = input(f"restore {len(latest.files)} file(s) from checkpoint "
+        created = len(latest.created_files)
+        detail = f"restore {len(latest.files)} file(s)"
+        if created:
+            detail += f" and delete {created} file(s) created after it"
+        answer = input(f"{detail} from checkpoint "
                        f"{latest.id}? [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
             self.renderer.line("muted", "aborted")
             return False
-        restored = self._loop.run_until_complete(
-            self.ctx.checkpoints.restore(latest.id))
-        self.renderer.line("success", f"restored {restored} file(s)")
+        report = self._loop.run_until_complete(
+            self.ctx.checkpoints.restore_report(latest.id))
+        message = f"restored {report.restored} file(s)"
+        if report.deleted:
+            message += f", deleted {report.deleted} created file(s)"
+        self.renderer.line("success", message)
         return False
 
     def _cmd_compact(self, rest: str) -> bool:

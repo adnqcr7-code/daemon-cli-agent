@@ -24,7 +24,7 @@ import httpx
 
 from ..errors import ToolError
 from ..log import get_logger
-from ..security import scan_injection
+from ..security import scan_injection_chunked
 from .base import Tool, ToolContext, ToolOutput
 
 _logger = get_logger("tools.web")
@@ -338,7 +338,7 @@ class WebFetchTool(Tool):
         else:
             raise ToolError(
                 f"Unsupported content type '{content_type or 'unknown'}' at {url}.")
-        findings = scan_injection(text[:20_000])
+        findings = scan_injection_chunked(text)
         warning = ""
         if findings:
             signature = "; ".join(description for description, _ in findings[:3])

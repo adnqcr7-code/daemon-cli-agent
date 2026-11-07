@@ -6,7 +6,7 @@ from ..config import Config
 from ..errors import AuthError, ProviderError
 from .anthropic import AnthropicAdapter
 from .base import ProviderAdapter
-from .catalog import PROVIDERS, ProviderDescriptor, provider_by_id
+from .catalog import ProviderDescriptor, provider_by_id
 from .gemini import GeminiAdapter
 from .openai_compat import OpenAICompatAdapter
 from .types import RemoteModel

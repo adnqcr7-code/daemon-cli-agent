@@ -27,11 +27,9 @@ from ..providers.types import (
     ToolResult,
     Usage,
 )
-from ..security import scan_injection
+from ..security import scan_injection_chunked
 from ..tools import ToolContext, ToolOutput, ToolRegistry
-from .context import should_compact, compact_conversation, truncate_tool_output
-from .failure_detector import FailureLoopDetector
-from .optimizer import ContextOptimizer, ContextOptimizationStats
+
 from .prompts import build_system_prompt
 from .session import Session
 from .tool_selector import ToolSelector
@@ -50,6 +48,9 @@ class RunResult:
     duration_s: float = 0.0
     files_changed: list[str] = field(default_factory=list)
     interrupted: bool = False
+    # Outcome of the enforced post-turn verification ("" when no files
+    # changed or verification is disabled). Never empty when files changed.
+    verification: str = ""
 
 
 class AgentUI:
@@ -154,6 +155,7 @@ class AgentRuntime:
                 tool_specs = self._tool_specs()
                 await self._maybe_compact(tool_specs)
                 if self.optimizer and self._optimization_enabled:
+
                     self.session.messages, opt_stats = await self.optimizer.optimize(
                         self.session.messages,
                         tool_specs,
@@ -192,6 +194,7 @@ class AgentRuntime:
                 await self.ui.notice(
                     f"Step limit reached ({max_turns}); stopping this turn.",
                     level="warn")
+            await self._verify_changed_files(result)
         except asyncio.CancelledError:
             result.interrupted = True
             audit("agent-interrupted", model=self.model.model_id)
@@ -228,20 +231,12 @@ class AgentRuntime:
             full_text = ""
         return full_text, tool_calls, usage
 
-    def _tool_specs(self) -> list:
-        """Tool definitions to advertise: registry minus task-irrelevant ones."""
-        from ..providers.types import ToolSpec
 
-        tools = [tool for tool in self.registry.tools()
-                 if tool.spec()["parameters"] is not None]
-        selected = self.tool_selector.select(self._current_task, tools)
-        return [ToolSpec(**tool.spec()) for tool in selected]
 
     def _build_request(self) -> ChatRequest:
         request = ChatRequest(
             model=self.model.model_id,
-            messages=list(self.session.messages),
-            tools=self._tool_specs(),
+
             system=self.system_prompt(),
             stream=True,
         )
@@ -350,8 +345,17 @@ class AgentRuntime:
         return decision
 
     def _fence(self, name: str, output: ToolOutput) -> str:
-        content = truncate_tool_output(output.content)
-        findings = scan_injection(content[:30_000])
+        # The full output is scanned (chunked, so a payload buried past any
+        # character limit is still caught) and kept in the session verbatim:
+        # only older results are shortened, at request-build time. The
+        # 500k backstop guards against a pathological tool flooding memory;
+        # every other tool already bounds its own output well below this.
+        content = output.content
+        if len(content) > _MAX_TOOL_OUTPUT_CHARS:
+            content = (content[:_MAX_TOOL_OUTPUT_CHARS]
+                       + "\n[... output truncated by daemon: exceeded "
+                       f"{_MAX_TOOL_OUTPUT_CHARS} characters ...]\n")
+        findings = scan_injection_chunked(content)
         prefix = ""
         if findings:
             signature = "; ".join(kind for kind, _ in findings[:3])
@@ -360,6 +364,43 @@ class AgentRuntime:
         status = "error" if output.is_error else "ok"
         return (f'<tool_output tool="{name}" status="{status}">\n'
                 f"{prefix}{content}\n</tool_output>")
+
+    async def _verify_changed_files(self, result: RunResult) -> None:
+        """Enforced verification: prove changed files work before claiming done.
+
+        Runs after the tool loop whenever files changed (and the turn was
+        not interrupted). A failure is reported in the result text and as a
+        notice — the edits stay, but the agent may not claim success it
+        did not check. Disabled only via ``verification.enabled=false``.
+        """
+        if not result.files_changed:
+            return
+        config = self.config
+        enabled = True if config is None else bool(
+            config.get("verification.enabled", True))
+        if not enabled:
+            return
+        run_tests = True if config is None else bool(
+            config.get("verification.run_tests", True))
+        timeout = 300.0 if config is None else float(
+            config.get("verification.timeout_s", 300) or 300)
+        from .verify import verify_changes
+
+        try:
+            outcome = await verify_changes(
+                self.workspace, result.files_changed,
+                run_tests=run_tests, timeout_s=timeout)
+        except Exception as exc:  # noqa: BLE001 - verification must never crash a run
+            result.verification = f"verification could not run: {exc}"
+            await self.ui.notice(
+                f"[daemon verification] {result.verification}", level="warn")
+            return
+        result.verification = outcome.summary()
+        level = "info" if outcome.passed else "warn"
+        await self.ui.notice(f"[daemon verification] {result.verification}",
+                             level=level)
+        result.text = (result.text + "\n\n[daemon verification] "
+                       + result.verification)
 
     async def _on_tool_event(self, event) -> None:
         await self.ui.tool_line(event.tool, event.line)
@@ -423,8 +464,8 @@ class AgentRuntime:
 
     def context_tokens(self) -> int:
         """Current estimated tokens in the conversation context."""
-        from .context import conversation_tokens
         from ..providers.types import ToolSpec
+        from .context import conversation_tokens
         specs = self.registry.specs()
         tools = [ToolSpec(**spec) for spec in specs]
         return conversation_tokens(self.session.messages, tools)
@@ -519,6 +560,47 @@ class AgentRuntime:
 
 _FILE_TOOLS = {"write_file", "edit_file", "apply_patch", "delete_path",
                "move_path", "format_code"}
+
+# Backstop against a pathological tool flooding the session; every built-in
+# tool already bounds its own output far below this (shell <=100 KB).
+_MAX_TOOL_OUTPUT_CHARS = 500_000
+
+# Older tool results are shortened to this when a request is built, so the
+# most recent result is always sent to the model in full.
+_OLDER_TOOL_RESULT_CHARS = 8_000
+
+
+def _messages_for_model(messages: list[Message]) -> list[Message]:
+    """Copy ``messages`` for the provider, shortening older tool results.
+
+    The most recent tool-result message is sent in full (that is the result
+    the model is about to act on); earlier results are cut to
+    ``_OLDER_TOOL_RESULT_CHARS`` with an explicit marker saying so. The
+    session itself keeps the full text — nothing is silently lost, and a
+    later compaction summary says what it was built from.
+    """
+    from dataclasses import replace
+
+    result_indices = [i for i, msg in enumerate(messages)
+                      if msg.role == "user" and msg.tool_results]
+    if len(result_indices) <= 1:
+        return list(messages)
+    latest = result_indices[-1]
+    rendered: list[Message] = []
+    for index, msg in enumerate(messages):
+        if index == latest or not msg.tool_results:
+            rendered.append(msg)
+            continue
+        shortened = [
+            replace(result, content=(
+                result.content[:_OLDER_TOOL_RESULT_CHARS]
+                + "\n[... older tool output shortened for context; "
+                "full output was shown when it was received ...]"))
+            if len(result.content) > _OLDER_TOOL_RESULT_CHARS else result
+            for result in msg.tool_results
+        ]
+        rendered.append(replace(msg, tool_results=shortened))
+    return rendered
 
 
 def _summarize_args(arguments: dict) -> str:

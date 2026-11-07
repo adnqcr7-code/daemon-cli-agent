@@ -3,9 +3,9 @@
 import asyncio
 
 from daemon.config import Config
-from daemon.providers.registry import AdapterRegistry, custom_descriptor
-from daemon.providers.types import ChatRequest, Message, ToolSpec
 from daemon.errors import AuthError
+from daemon.providers.registry import AdapterRegistry
+from daemon.providers.types import ChatRequest, Message, ToolSpec
 
 
 def _adapter(mock, config=None, key="test-key-1234567890", stream_usage=False):

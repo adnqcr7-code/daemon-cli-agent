@@ -12,9 +12,9 @@ import json
 import re
 import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterable
 
 from .config import daemon_home, project_dir
 from .log import audit, get_logger
@@ -37,7 +37,7 @@ class MemoryEntry:
         return asdict(self)
 
     @staticmethod
-    def from_json(data: dict) -> "MemoryEntry":
+    def from_json(data: dict) -> MemoryEntry:
         return MemoryEntry(
             content=data["content"], kind=data.get("kind", "note"),
             tags=list(data.get("tags") or []), source=data.get("source", "user"),

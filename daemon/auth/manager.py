@@ -16,7 +16,7 @@ from typing import Protocol
 
 from ..config import Config, daemon_home
 from ..errors import AuthError
-from ..log import audit, get_logger
+from ..log import get_logger
 from ..providers.catalog import PROVIDERS, provider_by_id
 from ..providers.detect import fingerprint, question_options
 from ..providers.registry import AdapterRegistry, custom_descriptor, discover_models

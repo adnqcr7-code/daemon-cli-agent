@@ -119,9 +119,9 @@ my_tools = "my_package.daemon_plugin:register"
 ```
 
 Every installed distribution exposing `daemon.tools` entry points is
-scanned at startup; each callable receives the registry. The same pattern
-with the `daemon.providers` group registers provider descriptors, and
-`daemon.agents` registers subagent roles.
+scanned at startup; each callable receives the registry. (The
+`daemon.providers` and `daemon.agents` entry-point groups are planned
+but not loaded yet — do not rely on them.)
 
 ## Testing your tools
 

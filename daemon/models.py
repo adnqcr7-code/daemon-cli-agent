@@ -12,13 +12,13 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from .errors import ModelError
 from .log import get_logger
-from .providers.types import ModelCapabilities, RemoteModel, Usage
+from .providers.types import RemoteModel, Usage
 
 _logger = get_logger("models")
 _CACHE_TTL_SECONDS = 24 * 3600

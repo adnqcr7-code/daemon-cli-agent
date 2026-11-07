@@ -32,7 +32,6 @@ import string
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 
@@ -115,7 +114,7 @@ class MCPClient:
             try:
                 self._process.stdin.close() if self._process.stdin else None
                 await asyncio.wait_for(self._process.wait(), 3)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._process.kill()
         if self._http is not None:
             if self.session_id and self.url:
@@ -270,7 +269,7 @@ class MCPClient:
         try:
             return await asyncio.wait_for(
                 future, timeout or self.request_timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending.pop(payload["id"], None)
             raise McpError(
                 f"MCP request timed out after "
@@ -364,7 +363,7 @@ class McpServerConfig:
 
     @staticmethod
     def from_entry(server_id: str, entry: dict, *,
-                   scope: str = "user") -> "McpServerConfig":
+                   scope: str = "user") -> McpServerConfig:
         return McpServerConfig(
             id=server_id,
             transport=str(entry.get("transport") or "stdio"),

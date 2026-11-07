@@ -4,6 +4,8 @@ tools and project integration. Optionally verify network reachability."""
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
+import importlib.util
 import platform
 import shutil
 import sys
@@ -16,6 +18,14 @@ from .log import get_logger
 _logger = get_logger("doctor")
 
 _OK, _WARN, _FAIL, _INFO = "ok", "warn", "fail", "info"
+
+
+def _distribution_version(module: str) -> str:
+    """Installed version of a dependency via importlib.metadata."""
+    try:
+        return importlib.metadata.version(module)
+    except importlib.metadata.PackageNotFoundError:
+        return "?"
 
 
 class Report:
@@ -39,7 +49,7 @@ def run_doctor(config: Config, workspace: Path, *,
     report = Report()
     _check_python(report)
     _check_terminal(report)
-    home = _check_home(report, fix)
+    _check_home(report, fix)
     _check_dependencies(report)
     _check_vault(report)
     _check_profiles(report)
@@ -94,14 +104,14 @@ def _check_home(report: Report, fix: bool) -> Path:
 def _check_dependencies(report: Report) -> None:
     required = {"click": "8.1", "rich": "13.7", "httpx": "0.27"}
     for module, minimum in required.items():
-        try:
-            imported = __import__(module)
-            version = getattr(imported, "__version__", "?")
-        except ImportError:
+        # importlib.metadata works for every installed distribution and
+        # avoids the deprecated Click __version__ attribute.
+        if importlib.util.find_spec(module) is None:
             report.add(_FAIL, f"dependency {module}",
                        f"missing - pip install '{module}>={minimum}'")
             continue
-        report.add(_OK, f"dependency {module}", version)
+        report.add(_OK, f"dependency {module}",
+                   _distribution_version(module))
     optional = {
         "keyring": "OS keychain storage",
         "cryptography": "AES-256-GCM encrypted vault",

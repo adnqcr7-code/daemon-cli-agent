@@ -17,9 +17,9 @@ from .checkpoints import CheckpointManager
 from .config import Config, daemon_home
 from .errors import AuthError, DaemonError, ModelError
 from .log import get_logger, setup_logging
+from .mcp import McpManager, McpRemoteTool
 from .memory import MemoryStore
 from .models import ModelRegistry, RemoteModel, pick_role_model
-from .mcp import McpManager, McpRemoteTool
 from .permissions import PermissionEngine
 from .project import ProjectIndex
 from .providers.catalog import provider_by_id
@@ -180,6 +180,13 @@ def build_context(
 
     # ---- tools + permissions -------------------------------------------------
     ctx.registry = default_registry()
+    from .plugins import load_plugins
+
+    plugin_result = load_plugins(workspace, config, ctx.registry)
+    if plugin_result.failed:
+        _logger.warning("plugins not loaded: %s",
+                        ", ".join(f"{name} ({reason})"
+                                  for name, reason in plugin_result.failed))
     rules = config.get("permissions.rules") or []
     ctx.permissions = PermissionEngine(
         workspace, rules=rules,

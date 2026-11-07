@@ -45,7 +45,7 @@ class Profile:
         return asdict(self) | {"id": self.id}
 
     @staticmethod
-    def from_json(data: dict) -> "Profile":
+    def from_json(data: dict) -> Profile:
         return Profile(
             provider=data["provider"],
             label=data.get("label"),
