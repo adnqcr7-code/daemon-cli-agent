@@ -345,16 +345,24 @@ class AgentRuntime:
         return decision
 
     def _fence(self, name: str, output: ToolOutput) -> str:
-        # The full output is scanned (chunked, so a payload buried past any
-        # character limit is still caught) and kept in the session verbatim:
-        # only older results are shortened, at request-build time. The
-        # 500k backstop guards against a pathological tool flooding memory;
-        # every other tool already bounds its own output well below this.
+        # Bound the result to the model's remaining context before fencing it.
+        # The 500k ceiling is a backstop for pathological third-party tools.
         content = output.content
-        if len(content) > _MAX_TOOL_OUTPUT_CHARS:
-            content = (content[:_MAX_TOOL_OUTPUT_CHARS]
-                       + "\n[... output truncated by daemon: exceeded "
-                       f"{_MAX_TOOL_OUTPUT_CHARS} characters ...]\n")
+        output_budget = _MAX_TOOL_OUTPUT_CHARS
+        model = getattr(self, "model", None)
+        if model is not None:
+            available_tokens = (
+                context_budget(model.capabilities.context_window)
+                - self.context_tokens()
+                - estimate_tokens(self.system_prompt())
+                - 1024
+            )
+            output_budget = min(
+                output_budget,
+                max(1_000, available_tokens * 3),
+            )
+        if len(content) > output_budget:
+            content = truncate_tool_output(content, max_chars=output_budget)
         findings = scan_injection_chunked(content)
         prefix = ""
         if findings:
