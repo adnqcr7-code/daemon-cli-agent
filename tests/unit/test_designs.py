@@ -4,8 +4,7 @@ import asyncio
 
 import pytest
 
-from daemon.designs import (BitonClient, Design, DesignError,
-                            extract_catalogue, render_brief)
+from daemon.designs import BitonClient, Design, DesignError, extract_catalogue, render_brief
 from daemon.tools import ToolContext, ToolRegistry
 from daemon.tools.design import register_design_tools
 
