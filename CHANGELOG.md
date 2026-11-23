@@ -5,7 +5,52 @@ The format follows Keep a Changelog; versioning is semantic.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-23
 
+Tier 1: worktree isolation, a ranked repo map, verified memory with
+optimization reporting, and a hard verification loop.
+
+### Added
+
+- **Git worktree isolation**: `daemon worktree create/list/status/remove`
+  manages per-task worktrees under `.daemon/worktrees/` on
+  `daemon/<task>` branches (registered in `.git/info/exclude`, never by
+  editing the user's `.gitignore`). `daemon run --worktree "<task>"`
+  runs a task in a fresh worktree and keeps it for review/merge.
+- **Ranked repo map**: `daemon repomap [task]` ranks files by symbol and
+  path matches with the task, import centrality, entrypoints, and git
+  recency — every score carries a human-readable reason. A budgeted map
+  is injected into the build agent's system prompt.
+- **Verified memory**: memory entries gain confidence, source location,
+  verified/supersede/invalidate tracking (old JSONL still loads).
+  `daemon memory add-verified / verified / invalidate`, contradiction
+  warnings on save, and a verified-facts block in the project context.
+- **Optimization reporting**: every run writes
+  `.daemon/reports/<session>.json` (tokens, tool calls, failures,
+  failure loops, verified facts, verification outcome, cost when
+  known — never invented). `daemon optimize list/show/compare`.
+- **Hard verification loop**: verification now also runs the project's
+  lint (ruff / npm lint / go vet) and typecheck (mypy / pyright /
+  tsc) when configured and installed, and a failure is fed back to
+  the agent for repair attempts (`verification.repair_attempts`,
+  default 1) before the turn may finish.
+- **PyPI publishing**: trusted-publishing workflow
+  (`.github/workflows/publish.yml`); install with
+  `pipx install daemon-agent[...]` (see README).
+
+### Fixed
+
+- The agent runtime at 0.2.x was missing imports and two methods the
+  release shipped references to (`ContextOptimizer`,
+  `FailureLoopDetector`, context helpers, `_tool_specs`,
+  `_build_request` never sent messages/tools, and
+  `register_design_tools` was called without being imported), so the
+  shipped runtime could not complete a run. All restored, with the
+  failure-loop nudge and tool pruning wired as designed.
+- Verification could silently test stale bytecode: timestamp `.pyc`
+  invalidation uses second-resolution mtimes, so two same-size edits
+  within one second left tests importing the old code. Verification
+  now drops changed files' cached bytecode first.
 
 ## [0.2.0] - 2026-11-03
 

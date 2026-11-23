@@ -58,14 +58,22 @@ exact command to use; you do not need to edit TOML by hand.
 
 ### Install the latest release
 
-Install the v0.2.0 wheel with Python 3.11 or newer:
+With Python 3.11 or newer, install Daemon from PyPI — one line, using
+whichever Python tool you already have:
 
-```powershell
-python -m pip install --upgrade "daemon-agent[keyring,crypto,repl] @ https://github.com/adnqcr7-code/daemon-cli-agent/releases/download/v0.2.0/daemon_agent-0.2.0-py3-none-any.whl"
+```bash
+pipx install "daemon-agent[keyring,crypto,repl]"     # recommended
+# or: uvx --from "daemon-agent[keyring,crypto,repl]" daemon
+# or: python -m pip install "daemon-agent[keyring,crypto,repl]"
+
 daemon auth add
-cd C:\path\to\your-project
+cd /path/to/your-project
 daemon
 ```
+
+Releases are also attached to
+[GitHub Releases](https://github.com/adnqcr7-code/daemon-cli-agent/releases)
+as wheels if you prefer to install a specific build directly.
 
 For source installs and development, use the platform installers below.
 
@@ -251,7 +259,10 @@ daemon mcp …               add / list / remove / test / enable / disable
 daemon tools               list every registered tool
 daemon agents              list specialized subagents
 daemon sessions …          list / show / delete / resume
-daemon memory …            list / search / clear
+daemon memory …            list / search / clear / add-verified / verified / invalidate
+daemon worktree …          create / list / status / remove (per-task git worktrees)
+daemon repomap [task]      ranked repo map: most relevant files first
+daemon optimize …          list / show / compare per-session optimization reports
 daemon config …            get / set / list / path
 daemon doctor              diagnose everything (--net to probe endpoints)
 daemon version             version, protocols, provider count
