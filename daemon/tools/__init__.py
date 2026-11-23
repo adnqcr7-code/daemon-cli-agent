@@ -9,9 +9,9 @@ from .patches import apply_hunks, parse_unified_diff, unified_diff_text
 def register_builtin_tools(registry: ToolRegistry) -> ToolRegistry:
     """Register every first-party tool on a fresh registry."""
     from .codeintel import register_codeintel_tools
+    from .design import register_design_tools
     from .fs import register_filesystem_tools
     from .git import register_git_tools
-
     from .misc import register_misc_tools
     from .shell import register_shell_tools
     from .web import register_web_tools
