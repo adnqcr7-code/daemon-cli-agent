@@ -8,6 +8,7 @@ Commands:
   daemon run / plan / review / research
   daemon design ... / build from <design-url>
   daemon tools / agents / mcp / sessions / memory / config
+  daemon worktree / repomap / optimize
   daemon doctor              environment diagnostics
   daemon version
 """
@@ -137,12 +138,11 @@ def _launch_repl(*, workspace: Path | None, model: str | None, theme: str | None
                     fg="yellow",
                 )
                 click.echo(
-                    f"Update with `python -m pip install --upgrade "
-                    f"daemon-agent @ https://github.com/adnqcr7-code/"
-                    f"daemon-cli-agent/releases/download/v{latest}/"
-                    f"daemon_agent-{latest}-py3-none-any.whl` "
-                    "or see https://github.com/adnqcr7-code/daemon-cli-agent/"
-                    "releases/latest"
+                    "Update with `pipx upgrade daemon-agent` or "
+                    "`python -m pip install --upgrade daemon-agent` "
+                    "(wheels are also attached to "
+                    "https://github.com/adnqcr7-code/daemon-cli-agent/"
+                    "releases/latest)"
                 )
         renderer = _make_renderer(config, plain=plain, theme=theme)
         ctx = build_context(workspace=workspace, config=config,
@@ -404,12 +404,27 @@ def models_set(role: str, model_id: str) -> None:
 @click.option("--yes", "assume_yes", is_flag=True,
               help="Assume-yes for permission prompts (CI/scripting)")
 @click.option("--json", "as_json", is_flag=True, help="Structured output")
+@click.option("--worktree", is_flag=True,
+              help="Run in an isolated git worktree on a daemon/<task> branch")
 @_workspace_option
 def run(task: str, model: str | None, profile: str | None, assume_yes: bool,
-        as_json: bool, workspace: Path | None) -> None:
+        as_json: bool, worktree: bool, workspace: Path | None) -> None:
     """Run one task non-interactively, then exit."""
     from .context import attach_mcp_tools, build_context
 
+    worktree_info = None
+    if worktree:
+        from .worktree import WorktreeManager
+
+        base = (workspace or Path.cwd()).resolve()
+        try:
+            worktree_info = WorktreeManager().create(base, task)
+        except DaemonError as exc:
+            _fail(exc)
+        workspace = worktree_info.path
+        if not as_json:
+            _echo(f"worktree: {worktree_info.path} "
+                  f"(branch {worktree_info.branch})", color="cyan")
     config = Config.load(workspace)
     try:
         ctx = build_context(workspace=workspace, config=config,
@@ -444,12 +459,21 @@ def run(task: str, model: str | None, profile: str | None, assume_yes: bool,
             "usage": ctx.session.usage.to_json(),
             "cost_usd": result.cost_usd,
             "files_changed": result.files_changed,
+            "verification": result.verification,
+            "worktree": ({"path": str(worktree_info.path),
+                          "branch": worktree_info.branch}
+                         if worktree_info else None),
         }, indent=2))
     else:
         # the streamed text was already printed live by the renderer;
         # only files/verification summary is added here
         if result.files_changed:
             _echo("changed: " + ", ".join(result.files_changed), color="green")
+        if worktree_info is not None:
+            _echo(f"worktree kept: {worktree_info.path} "
+                  f"(branch {worktree_info.branch}) - review it, merge it, "
+                  "or remove it with `daemon worktree remove "
+                  f"{worktree_info.slug}`", color="cyan")
         if result.interrupted:
             sys.exit(130)
     ctx.close()
@@ -982,6 +1006,70 @@ def memory_clear(scope: str, workspace: Path | None) -> None:
     _echo(f"Cleared {count} {scope} memory entries", color="green")
 
 
+@memory.command("add-verified")
+@click.argument("content")
+@click.option("--source", default="user",
+              help="Who or what established this fact")
+@click.option("--location", "source_location", default="",
+              help="Where it can be checked: file:line, commit, or URL")
+@click.option("--confidence", type=float, default=0.9,
+              help="Confidence 0.0-1.0 (default 0.9)")
+@click.option("--tag", "tags", multiple=True)
+@click.option("--workspace", "-w", type=click.Path(file_okay=False,
+                                                   path_type=Path), default=None)
+def memory_add_verified(content: str, source: str, source_location: str,
+                        confidence: float, tags: tuple[str, ...],
+                        workspace: Path | None) -> None:
+    """Save a verified project fact (with source and confidence)."""
+    from .memory import MemoryStore
+
+    store = MemoryStore(workspace)
+    contradictions = store.find_contradictions(
+        content, source_location=source_location)
+    entry = store.add_verified(
+        content, source=source, source_location=source_location,
+        confidence=confidence, tags=tags)
+    _echo(f"Verified fact saved [{entry.id}] "
+          f"confidence {entry.confidence:.2f}", color="green")
+    for old in contradictions:
+        _echo(f"warning: may contradict [{old.id}] {old.content[:80]}",
+              color="yellow")
+
+
+@memory.command("verified")
+@click.option("--workspace", "-w", type=click.Path(file_okay=False,
+                                                   path_type=Path), default=None)
+def memory_verified(workspace: Path | None) -> None:
+    """List verified facts, highest confidence first."""
+    from .memory import MemoryStore
+
+    facts = MemoryStore(workspace).get_verified_facts(limit=40)
+    if not facts:
+        _echo("No verified facts yet. Add one with "
+              "`daemon memory add-verified \"...\" --location file.py:42`.")
+        return
+    for fact in facts:
+        where = f"  @ {fact.source_location}" if fact.source_location else ""
+        _echo(f"[{fact.id}] ({fact.confidence:.2f}) {fact.content[:100]}{where}")
+
+
+@memory.command("invalidate")
+@click.argument("entry_id")
+@click.option("--reason", default="superseded",
+              help="Why this entry is no longer true")
+@click.option("--workspace", "-w", type=click.Path(file_okay=False,
+                                                   path_type=Path), default=None)
+def memory_invalidate(entry_id: str, reason: str,
+                      workspace: Path | None) -> None:
+    """Mark a memory entry outdated (kept on disk, hidden from the agent)."""
+    from .memory import MemoryStore
+
+    if MemoryStore(workspace).invalidate(entry_id, reason):
+        _echo(f"Invalidated {entry_id}: {reason}", color="green")
+    else:
+        _echo(f"No memory entry {entry_id}.", color="yellow")
+
+
 @main.group()
 def config() -> None:
     """Manage configuration."""
@@ -1088,6 +1176,188 @@ def version(verbose: bool) -> None:
         _echo(f"protocols: {', '.join(AdapterRegistry.protocols())}")
         _echo(f"providers catalogued: {len(PROVIDERS)}")
         _echo(f"home: {daemon_home()}")
+
+
+# ---------------------------------------------------------------------------
+# worktree / repomap / optimize (Tier 1)
+# ---------------------------------------------------------------------------
+
+
+def _find_worktree(manager, workspace: Path, target: str):
+    """Resolve a daemon worktree by path, slug, or branch."""
+    for info in manager.list_worktrees(workspace):
+        if target in (str(info.path), info.slug, info.branch):
+            return info
+    return None
+
+
+@main.group()
+def worktree() -> None:
+    """Manage per-task git worktrees (.daemon/worktrees/)."""
+
+
+@worktree.command("create")
+@click.argument("slug")
+@click.option("--base", "base_ref", default=None,
+              help="Base git ref (default: HEAD)")
+@_workspace_option
+def worktree_create(slug: str, base_ref: str | None,
+                    workspace: Path | None) -> None:
+    """Create an isolated worktree for SLUG on a daemon/ branch."""
+    from .worktree import WorktreeManager
+
+    ws = (workspace or Path.cwd()).resolve()
+    try:
+        info = WorktreeManager().create(ws, slug, base_ref=base_ref)
+    except DaemonError as exc:
+        _fail(exc)
+    _echo(f"worktree {info.path}", color="green")
+    _echo(f"branch   {info.branch} (from {info.base_ref[:12]})")
+    _echo(f"Run there with: daemon run --worktree \"<task>\" -w {ws}")
+
+
+@worktree.command("list")
+@_workspace_option
+def worktree_list(workspace: Path | None) -> None:
+    """List daemon-managed worktrees for this repository."""
+    from .worktree import WorktreeManager
+
+    ws = (workspace or Path.cwd()).resolve()
+    infos = WorktreeManager().list_worktrees(ws)
+    if not infos:
+        _echo("No daemon worktrees.")
+        return
+    for info in infos:
+        _echo(f"{info.branch:<40} {info.path}")
+
+
+@worktree.command("status")
+@click.argument("target")
+@_workspace_option
+def worktree_status(target: str, workspace: Path | None) -> None:
+    """Show changes in the worktree named by slug, branch, or path."""
+    from .worktree import WorktreeManager
+
+    ws = (workspace or Path.cwd()).resolve()
+    manager = WorktreeManager()
+    info = _find_worktree(manager, ws, target)
+    if info is None:
+        _echo(f"No daemon worktree matches {target!r}.", color="yellow")
+        return
+    status = manager.status(ws, info)
+    _echo(f"{info.branch} - {status['changed_files']} changed file(s)")
+    for line in status["status_lines"]:
+        _echo(f"  {line}")
+    if status["diff_stat"]:
+        _echo(status["diff_stat"])
+
+
+@worktree.command("remove")
+@click.argument("target")
+@click.option("--force", is_flag=True,
+              help="Remove even when dirty, and delete the branch")
+@_workspace_option
+def worktree_remove(target: str, force: bool,
+                    workspace: Path | None) -> None:
+    """Remove the worktree named by slug, branch, or path."""
+    from .worktree import WorktreeManager
+
+    ws = (workspace or Path.cwd()).resolve()
+    manager = WorktreeManager()
+    info = _find_worktree(manager, ws, target)
+    if info is None:
+        _echo(f"No daemon worktree matches {target!r}.", color="yellow")
+        return
+    try:
+        removed = manager.remove(ws, info, force=force)
+    except DaemonError as exc:
+        _fail(exc)
+    if removed:
+        tail = (f" and deleted branch {info.branch}" if force
+                else f" (branch {info.branch} kept)")
+        _echo(f"Removed {info.path}{tail}", color="green")
+    else:
+        _echo("Already gone.")
+
+
+@main.command("repomap")
+@click.argument("task", required=False, default="")
+@click.option("--budget", type=int, default=1024,
+              help="Token budget for the map")
+@click.option("--scores", is_flag=True,
+              help="Show ranked files with scores and reasons")
+@_workspace_option
+def repomap_cmd(task: str, budget: int, scores: bool,
+                workspace: Path | None) -> None:
+    """Print the ranked repo map for a task (most relevant files first)."""
+    from .agent.repomap import RepoMap
+
+    ws = (workspace or Path.cwd()).resolve()
+    repo_map = RepoMap(ws)
+    if scores:
+        for ranked in repo_map.rank(task):
+            _echo(f"{ranked.score:7.1f}  {ranked.path}")
+            for reason in ranked.reasons:
+                _echo(f"         - {reason}")
+    else:
+        _echo(repo_map.render(task, token_budget=budget))
+
+
+@main.group()
+def optimize() -> None:
+    """Optimization reports: per-session token and tool savings."""
+
+
+@optimize.command("list")
+@_workspace_option
+def optimize_list(workspace: Path | None) -> None:
+    """List saved optimization reports for this workspace."""
+    from .agent.reporting import list_reports
+
+    ws = (workspace or Path.cwd()).resolve()
+    reports = list_reports(ws)
+    if not reports:
+        _echo("No optimization reports yet "
+              "(one is written after each agent run).")
+        return
+    for report in reports:
+        _echo(f"{report.session_id:<24} {(report.model or '?'):<24} "
+              f"saved {report.total_tokens_saved} tok - "
+              f"{report.total_tool_calls} tools")
+
+
+@optimize.command("show")
+@click.argument("session_id")
+@_workspace_option
+def optimize_show(session_id: str, workspace: Path | None) -> None:
+    """Show one session's optimization report."""
+    from .agent.reporting import load_report
+
+    ws = (workspace or Path.cwd()).resolve()
+    report = load_report(ws, session_id)
+    if report is None:
+        _echo(f"No report for session {session_id}.", color="yellow")
+        return
+    _echo(report.summary())
+
+
+@optimize.command("compare")
+@click.argument("baseline_id")
+@click.argument("candidate_id")
+@_workspace_option
+def optimize_compare(baseline_id: str, candidate_id: str,
+                     workspace: Path | None) -> None:
+    """Compare two session reports (e.g. optimization off vs on)."""
+    from .agent.reporting import compare_reports, load_report
+
+    ws = (workspace or Path.cwd()).resolve()
+    baseline = load_report(ws, baseline_id)
+    candidate = load_report(ws, candidate_id)
+    if baseline is None or candidate is None:
+        missing = baseline_id if baseline is None else candidate_id
+        _echo(f"No report for session {missing}.", color="yellow")
+        return
+    _echo(compare_reports(baseline, candidate))
 
 
 def _parse_kv(pairs: tuple[str, ...]) -> dict[str, str]:

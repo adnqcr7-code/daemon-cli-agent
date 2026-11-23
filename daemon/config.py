@@ -75,7 +75,18 @@ DEFAULTS: dict[str, Any] = {
         # never silently ignored; set enabled=false to opt out.
         "enabled": True,
         "run_tests": True,
+        "lint": True,
+        "typecheck": True,
+        # On a verification failure, feed the failures back to the agent
+        # for this many repair attempts before reporting the turn done.
+        "repair_attempts": 1,
         "timeout_s": 300,
+    },
+    "repomap": {
+        # Ranked repo map (most relevant files for the current task)
+        # injected into the system prompt, Aider-style.
+        "enabled": True,
+        "token_budget": 512,
     },
     "research": {
         "search_backend": "duckduckgo",
@@ -129,7 +140,7 @@ DEFAULTS: dict[str, Any] = {
             "max_verified_facts": 10,
         },
         "reporting": {
-            "enabled": False,
+            "enabled": True,
         },
     },
 }

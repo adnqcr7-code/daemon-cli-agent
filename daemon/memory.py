@@ -26,23 +26,63 @@ _logger = get_logger("memory")
 @dataclass
 class MemoryEntry:
     content: str
-    kind: str = "note"        # note | fact | decision | research | preference
+    # note | fact | decision | research | preference | verified_fact
+    kind: str = "note"
     tags: list[str] = field(default_factory=list)
     source: str = "user"      # user | agent | research
     scope: str = "project"    # user | project | session
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     created: float = field(default_factory=time.time)
+    confidence: float = 1.0   # 0.0 - 1.0, clamped in __post_init__
+    source_location: str = ""  # e.g. "file.py:42", a commit hash, or a URL
+    verified: bool = False    # explicitly confirmed by user or test
+    supersedes: list[str] = field(default_factory=list)
+    invalidated: bool = False
+    invalidated_reason: str = ""
+
+    def __post_init__(self) -> None:
+        try:
+            confidence = float(self.confidence)
+        except (TypeError, ValueError):
+            confidence = 1.0
+        self.confidence = max(0.0, min(1.0, confidence))
+        self.supersedes = list(self.supersedes or [])
 
     def to_json(self) -> dict:
         return asdict(self)
 
     @staticmethod
     def from_json(data: dict) -> MemoryEntry:
+        try:
+            confidence = float(data.get("confidence", 1.0))
+        except (TypeError, ValueError):
+            confidence = 1.0
         return MemoryEntry(
             content=data["content"], kind=data.get("kind", "note"),
             tags=list(data.get("tags") or []), source=data.get("source", "user"),
             scope=data.get("scope", "project"), id=data.get("id") or uuid.uuid4().hex[:12],
-            created=float(data.get("created") or time.time()))
+            created=float(data.get("created") or time.time()),
+            confidence=confidence,
+            source_location=str(data.get("source_location") or ""),
+            verified=bool(data.get("verified", False)),
+            supersedes=list(data.get("supersedes") or []),
+            invalidated=bool(data.get("invalidated", False)),
+            invalidated_reason=str(data.get("invalidated_reason") or ""))
+
+
+def _normalize_content(content: str) -> str:
+    return " ".join(re.split(r"\W+", content.lower())).strip()
+
+
+def _word_set(content: str) -> set[str]:
+    return {term for term in re.split(r"\W+", content.lower()) if term}
+
+
+def _jaccard(left: set[str], right: set[str]) -> float:
+    union = left | right
+    if not union:
+        return 0.0
+    return len(left & right) / len(union)
 
 
 class MemoryStore:
@@ -72,9 +112,28 @@ class MemoryStore:
         audit("memory-added", kind=kind, scope=scope, id=entry.id)
         return entry
 
+    def add_verified(self, content: str, *, source: str, source_location: str,
+                     confidence: float = 0.9, tags: Iterable[str] = (),
+                     supersedes: Iterable[str] = ()) -> MemoryEntry:
+        """Add a verified fact with source tracking (scope="project")."""
+        content = redact(content.strip())
+        if not content:
+            raise ValueError("Memory content is empty.")
+        entry = MemoryEntry(content=content, kind="verified_fact", scope="project",
+                            tags=list(tags), source=source, confidence=confidence,
+                            source_location=source_location, verified=True,
+                            supersedes=list(supersedes))
+        path = self._path_for("project")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry.to_json()) + "\n")
+        audit("memory-added", kind="verified_fact", scope="project", id=entry.id)
+        return entry
+
     # ------------------------------------------------------------- reading
 
-    def entries(self, scope: str | None = None) -> list[MemoryEntry]:
+    def entries(self, scope: str | None = None,
+                include_invalidated: bool = False) -> list[MemoryEntry]:
         results: list[MemoryEntry] = []
         for layer in ("user", "project"):
             if scope is not None and scope != layer:
@@ -88,7 +147,76 @@ class MemoryStore:
                         results.append(MemoryEntry.from_json(json.loads(line)))
             except (OSError, ValueError) as exc:
                 _logger.warning("corrupt memory line in %s: %s", path, exc)
+        if not include_invalidated:
+            results = [entry for entry in results if not entry.invalidated]
         return sorted(results, key=lambda entry: -entry.created)
+
+    def get_verified_facts(self, limit: int = 20) -> list[MemoryEntry]:
+        """Verified, non-invalidated facts, confidence desc then newest."""
+        facts = [entry for entry in self.entries()
+                 if entry.verified or entry.kind == "verified_fact"]
+        facts.sort(key=lambda entry: (-entry.confidence, -entry.created))
+        return facts[:limit]
+
+    def find_contradictions(self, content: str, *,
+                            source_location: str = "") -> list[MemoryEntry]:
+        """Heuristic contradiction candidates (heuristic, not proof).
+
+        - With a non-empty ``source_location``: non-invalidated verified
+          facts sharing that exact source_location but with different
+          normalized content are candidates.
+        - Without one: non-invalidated verified facts whose word set has
+          Jaccard overlap >= 0.6 with ``content`` but whose normalized
+          content differs are candidates.
+        Deterministic: results follow ``entries()`` order (newest first).
+        """
+        normalized = _normalize_content(content)
+        candidates: list[MemoryEntry] = []
+        for entry in self.entries():
+            if not (entry.verified or entry.kind == "verified_fact"):
+                continue
+            if _normalize_content(entry.content) == normalized:
+                continue
+            if source_location:
+                if entry.source_location and entry.source_location == source_location:
+                    candidates.append(entry)
+            else:
+                overlap = _jaccard(_word_set(content), _word_set(entry.content))
+                if overlap >= 0.6:
+                    candidates.append(entry)
+        return candidates
+
+    def invalidate(self, entry_id: str, reason: str) -> bool:
+        """Mark an entry invalidated in its JSONL file (never deletes it)."""
+        for layer in ("user", "project"):
+            path = self._path_for(layer)
+            if path is None or not path.exists():
+                continue
+            lines = path.read_text("utf-8").splitlines()
+            updated: list[str] = []
+            found = False
+            for line in lines:
+                if not line.strip() or found:
+                    updated.append(line)
+                    continue
+                try:
+                    data = json.loads(line)
+                except ValueError:
+                    updated.append(line)
+                    continue
+                if data.get("id") == entry_id:
+                    data["invalidated"] = True
+                    data["invalidated_reason"] = reason
+                    updated.append(json.dumps(data))
+                    found = True
+                else:
+                    updated.append(line)
+            if found:
+                path.write_text("\n".join(updated) + ("\n" if updated else ""),
+                                encoding="utf-8")
+                audit("memory-invalidated", id=entry_id, reason=reason)
+                return True
+        return False
 
     def search(self, query: str, *, kind: str | None = None,
                limit: int = 20) -> list[MemoryEntry]:
@@ -107,9 +235,19 @@ class MemoryStore:
     def project_context(self, limit: int = 12) -> str:
         """Curated memory block for the agent system prompt."""
         relevant = [entry for entry in self.entries() if entry.scope == "project"]
+        verified = [entry for entry in relevant
+                    if entry.verified or entry.kind == "verified_fact"]
+        verified.sort(key=lambda entry: (-entry.confidence, -entry.created))
+        verified = verified[:8]
         decisions = [entry for entry in relevant if entry.kind == "decision"][:5]
-        facts = [entry for entry in relevant if entry.kind != "decision"][:limit]
+        facts = [entry for entry in relevant
+                 if entry.kind != "decision" and entry.kind != "verified_fact"
+                 and not entry.verified][:limit]
         blocks: list[str] = []
+        if verified:
+            blocks.append("Verified facts:\n" + "\n".join(
+                f"- {entry.content} (source: {entry.source_location or entry.source}, "
+                f"confidence {entry.confidence:.2f})" for entry in verified))
         if decisions:
             blocks.append("Engineering decisions:\n" + "\n".join(
                 f"- {entry.content}" for entry in decisions))
