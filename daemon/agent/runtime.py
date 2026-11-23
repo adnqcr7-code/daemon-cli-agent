@@ -25,11 +25,20 @@ from ..providers.types import (
     RemoteModel,
     ToolCall,
     ToolResult,
+    ToolSpec,
     Usage,
 )
 from ..security import scan_injection_chunked
 from ..tools import ToolContext, ToolOutput, ToolRegistry
-
+from .context import (
+    compact_conversation,
+    context_budget,
+    estimate_tokens,
+    should_compact,
+    truncate_tool_output,
+)
+from .failure_detector import FailureLoopDetector
+from .optimizer import ContextOptimizer
 from .prompts import build_system_prompt
 from .session import Session
 from .tool_selector import ToolSelector
@@ -137,6 +146,13 @@ class AgentRuntime:
         self._current_task = ""
         self._tool_prune_reported = False
         self._failure_nudge: str | None = None
+        # Tier 1 wiring: optimization reporting + verify/repair state.
+        self._opt_context_saved = 0
+        self._failed_tool_calls = 0
+        self._failure_loops = 0
+        self._verification_passed: bool | None = None
+        self._repomap_cache_task: str | None = None
+        self._repomap_cache = ""
 
     # ------------------------------------------------------------------ run
 
@@ -148,53 +164,75 @@ class AgentRuntime:
         self.session.add_user(user_text)
         self._current_task = user_text
         self._tool_prune_reported = False
+        self._opt_context_saved = 0
+        self._failed_tool_calls = 0
+        self._failure_loops = 0
+        self._verification_passed = None
         max_turns = self.config.max_turns() if self.config else 40
+        repair_attempts = 0
+        if self.config is not None:
+            try:
+                repair_attempts = int(
+                    self.config.get("verification.repair_attempts", 1) or 0)
+            except (TypeError, ValueError):
+                repair_attempts = 0
         try:
-            for step in range(1, max_turns + 1):
-                result.steps = step
-                tool_specs = self._tool_specs()
-                await self._maybe_compact(tool_specs)
-                if self.optimizer and self._optimization_enabled:
+            while True:
+                for step in range(1, max_turns + 1):
+                    result.steps = step
+                    tool_specs = self._tool_specs()
+                    await self._maybe_compact(tool_specs)
+                    if self.optimizer and self._optimization_enabled:
 
-                    self.session.messages, opt_stats = await self.optimizer.optimize(
-                        self.session.messages,
-                        tool_specs,
-                        self.model.capabilities.context_window,
-                        adapter=self.adapter,
-                        model_id=self.model.model_id,
-                        on_usage=self._record_aux_usage,
-                    )
-                    if opt_stats.tokens_saved > 0:
+                        self.session.messages, opt_stats = await self.optimizer.optimize(
+                            self.session.messages,
+                            tool_specs,
+                            self.model.capabilities.context_window,
+                            adapter=self.adapter,
+                            model_id=self.model.model_id,
+                            on_usage=self._record_aux_usage,
+                        )
+                        self._opt_context_saved += opt_stats.tokens_saved
+                        if opt_stats.tokens_saved > 0:
+                            await self.ui.notice(
+                                f"Context optimized: saved ~{opt_stats.tokens_saved} tokens "
+                                f"({opt_stats.original_tokens} -> {opt_stats.optimized_tokens})",
+                                level="debug")
+                    selection = self.tool_selector.last_stats
+                    if not self._tool_prune_reported and selection.tokens_saved > 0:
+                        self._tool_prune_reported = True
                         await self.ui.notice(
-                            f"Context optimized: saved ~{opt_stats.tokens_saved} tokens "
-                            f"({opt_stats.original_tokens} -> {opt_stats.optimized_tokens})",
+                            f"Tools pruned: advertising {selection.selected_count} of "
+                            f"{selection.original_count} (saves ~"
+                            f"{selection.tokens_saved} tokens per request).",
                             level="debug")
-                selection = self.tool_selector.last_stats
-                if not self._tool_prune_reported and selection.tokens_saved > 0:
-                    self._tool_prune_reported = True
+                    text, calls, usage = await self._stream_once()
+                    if usage is not None:
+                        await self._record_usage(usage, result)
+                    self.session.add_assistant(text or None, calls or None)
+                    if not calls:
+                        result.text = text or ""
+                        break
+                    results = await self._execute_calls(calls, result)
+                    self.session.add_tool_results(results)
+                    await self._check_failure_loop()
+                else:
+                    result.text = (result.text or
+                                   "Stopped: reached the maximum number of agent "
+                                   f"steps ({max_turns}).")
                     await self.ui.notice(
-                        f"Tools pruned: advertising {selection.selected_count} of "
-                        f"{selection.original_count} (saves ~"
-                        f"{selection.tokens_saved} tokens per request).",
-                        level="debug")
-                text, calls, usage = await self._stream_once()
-                if usage is not None:
-                    await self._record_usage(usage, result)
-                self.session.add_assistant(text or None, calls or None)
-                if not calls:
-                    result.text = text or ""
+                        f"Step limit reached ({max_turns}); stopping this turn.",
+                        level="warn")
+                outcome = await self._verify_changed_files(result)
+                if (outcome is None or outcome.passed
+                        or repair_attempts <= 0
+                        or not outcome.repair_prompt()):
                     break
-                results = await self._execute_calls(calls, result)
-                self.session.add_tool_results(results)
-                await self._check_failure_loop()
-            else:
-                result.text = (result.text or
-                               "Stopped: reached the maximum number of agent "
-                               f"steps ({max_turns}).")
+                repair_attempts -= 1
                 await self.ui.notice(
-                    f"Step limit reached ({max_turns}); stopping this turn.",
-                    level="warn")
-            await self._verify_changed_files(result)
+                    "Verification failed - sending the failures back "
+                    "to the agent for a repair attempt.", level="warn")
+                self.session.add_user(outcome.repair_prompt())
         except asyncio.CancelledError:
             result.interrupted = True
             audit("agent-interrupted", model=self.model.model_id)
@@ -204,6 +242,7 @@ class AgentRuntime:
             self._active_result = None
             await self.ui.text_done()
             self.session.save()
+            self._save_optimization_report(result)
         return result
 
     # --------------------------------------------------------------- stream
@@ -233,16 +272,25 @@ class AgentRuntime:
 
 
 
-    def _build_request(self) -> ChatRequest:
-        request = ChatRequest(
-            model=self.model.model_id,
+    def _tool_specs(self) -> list[ToolSpec]:
+        """Tool advertisements for the next request, pruned to the task."""
+        tools = self.tool_selector.select(
+            self._current_task, self.registry.tools())
+        return [ToolSpec(**tool.spec()) for tool in tools]
 
-            system=self.system_prompt(),
+    def _build_request(self) -> ChatRequest:
+        system = self.system_prompt()
+        # A failure-loop nudge is delivered once, on the next request only.
+        if self._failure_nudge:
+            system += f"\n\nFailure-loop intervention: {self._failure_nudge}"
+            self._failure_nudge = None
+        return ChatRequest(
+            model=self.model.model_id,
+            messages=list(self.session.messages),
+            tools=self._tool_specs(),
+            system=system,
             stream=True,
         )
-        # A failure-loop nudge is delivered once, on the next request only.
-        self._failure_nudge = None
-        return request
 
     # ------------------------------------------------------------- execution
 
@@ -310,12 +358,15 @@ class AgentRuntime:
                        f"{'; '.join(decision.reasons) or 'user declined'}. "
                        f"Adjust the plan or ask the user.")
             await self.ui.notice(f"Denied {decision.summary}", level="warn")
+            self._failed_tool_calls += 1
             self.failure_detector.record(call.name, call.arguments, message,
                                          is_error=True)
             return ToolResult(tool_call_id=call.id, tool_name=call.name,
                               content=message, is_error=True)
         output = await self.registry.execute(call.name, call.arguments,
                                              self.tool_ctx)
+        if output.is_error:
+            self._failed_tool_calls += 1
         self.tool_selector.record_use(call.name)
         self.failure_detector.record(call.name, call.arguments, output.content,
                                      is_error=output.is_error)
@@ -373,23 +424,30 @@ class AgentRuntime:
         return (f'<tool_output tool="{name}" status="{status}">\n'
                 f"{prefix}{content}\n</tool_output>")
 
-    async def _verify_changed_files(self, result: RunResult) -> None:
+    async def _verify_changed_files(self, result: RunResult):
         """Enforced verification: prove changed files work before claiming done.
 
         Runs after the tool loop whenever files changed (and the turn was
-        not interrupted). A failure is reported in the result text and as a
-        notice — the edits stay, but the agent may not claim success it
-        did not check. Disabled only via ``verification.enabled=false``.
+        not interrupted): compileall, lint and typecheck when the project
+        configures them, and the project's test runner. Returns the
+        VerificationResult, or None when nothing ran (no files changed,
+        or verification disabled via ``verification.enabled=false``).
+        The run loop feeds a failure back to the agent for repair
+        attempts (``verification.repair_attempts``) before finishing.
         """
         if not result.files_changed:
-            return
+            return None
         config = self.config
         enabled = True if config is None else bool(
             config.get("verification.enabled", True))
         if not enabled:
-            return
+            return None
         run_tests = True if config is None else bool(
             config.get("verification.run_tests", True))
+        run_lint = True if config is None else bool(
+            config.get("verification.lint", True))
+        run_typecheck = True if config is None else bool(
+            config.get("verification.typecheck", True))
         timeout = 300.0 if config is None else float(
             config.get("verification.timeout_s", 300) or 300)
         from .verify import verify_changes
@@ -397,18 +455,95 @@ class AgentRuntime:
         try:
             outcome = await verify_changes(
                 self.workspace, result.files_changed,
-                run_tests=run_tests, timeout_s=timeout)
+                run_tests=run_tests, run_lint=run_lint,
+                run_typecheck=run_typecheck, timeout_s=timeout)
         except Exception as exc:  # noqa: BLE001 - verification must never crash a run
             result.verification = f"verification could not run: {exc}"
             await self.ui.notice(
                 f"[daemon verification] {result.verification}", level="warn")
-            return
+            return None
+        self._verification_passed = outcome.passed
         result.verification = outcome.summary()
         level = "info" if outcome.passed else "warn"
         await self.ui.notice(f"[daemon verification] {result.verification}",
                              level=level)
         result.text = (result.text + "\n\n[daemon verification] "
                        + result.verification)
+        return outcome
+
+    def _save_optimization_report(self, result: RunResult) -> None:
+        """Persist the per-session optimization report (best effort).
+
+        Written to ``<workspace>/.daemon/reports/<session-id>.json`` and
+        read back by ``daemon optimize``. Never raises: a report must
+        not break a run. Disabled via ``optimization.reporting.enabled``.
+        """
+        try:
+            if self.config is not None and not bool(
+                    self.config.get("optimization.reporting.enabled", True)):
+                return
+            from .reporting import OptimizationReporter, save_report
+
+            reporter = OptimizationReporter(
+                self.session.meta.id, model=self.model.model_id,
+                provider=self.model.provider,
+                optimization_enabled=self._optimization_enabled)
+            reporter.record_context(self._opt_context_saved)
+            stats = self.tool_selector.last_stats
+            reporter.record_tool_selection(
+                stats.original_count, stats.selected_count, stats.tokens_saved)
+            failed = min(self._failed_tool_calls, result.tool_calls)
+            for _ in range(result.tool_calls - failed):
+                reporter.record_tool_call()
+            for _ in range(failed):
+                reporter.record_tool_call(failed=True)
+            for _ in range(self._failure_loops):
+                reporter.record_failure_loop()
+            if self.memory is not None:
+                try:
+                    reporter.record_verified_facts(
+                        len(self.memory.get_verified_facts()))
+                except Exception:  # noqa: BLE001 - best effort
+                    pass
+            reporter.set_usage(result.usage.input_tokens,
+                               result.usage.output_tokens, result.cost_usd)
+            reporter.set_verification(self._verification_passed)
+            reporter.add_files_changed(len(result.files_changed))
+            save_report(reporter.finalize(duration_s=result.duration_s),
+                        self.workspace)
+        except Exception as exc:  # noqa: BLE001 - best effort
+            _logger.debug("optimization report failed: %s", exc)
+
+    def _repomap_block(self) -> str:
+        """Ranked repo map for the current task, cached per task text."""
+        if self.role != "build" or self.index is None:
+            return ""
+        if self.config is not None and not bool(
+                self.config.get("repomap.enabled", True)):
+            return ""
+        task = self._current_task or self.session.last_user_text() or ""
+        if not task:
+            return ""
+        if self._repomap_cache_task == task:
+            return self._repomap_cache
+        block = ""
+        try:
+            from .repomap import RepoMap
+
+            budget = 512
+            if self.config is not None:
+                budget = int(self.config.get("repomap.token_budget", 512)
+                             or 512)
+            rendered = RepoMap(self.workspace, index=self.index).render(
+                task, token_budget=budget)
+            if rendered.strip():
+                block = ("\n\nRanked repo map (most relevant files for "
+                         f"the current task first):\n{rendered}")
+        except Exception as exc:  # noqa: BLE001 - a map must never break a run
+            _logger.debug("repo map failed: %s", exc)
+        self._repomap_cache_task = task
+        self._repomap_cache = block
+        return block
 
     async def _on_tool_event(self, event) -> None:
         await self.ui.tool_line(event.tool, event.line)
@@ -419,6 +554,7 @@ class AgentRuntime:
         if not report.detected or not report.recommendation:
             return
         self._failure_nudge = report.recommendation
+        self._failure_loops += 1
         await self.ui.notice(report.recommendation, level="warn")
 
     # ----------------------------------------------------------- compaction
@@ -548,7 +684,7 @@ class AgentRuntime:
                     memory_block = "Project memory and decisions:\n" + context
             prompt = build_system_prompt(
                 workspace=str(self.workspace),
-                project_summary=project_summary,
+                project_summary=project_summary + self._repomap_block(),
                 memory_block=memory_block,
                 extra=self.extra_context() if self.extra_context else "",
             )
