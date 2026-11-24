@@ -140,6 +140,30 @@ def test_get_verified_facts_ordering_and_excludes_invalidated(home, workspace):
     assert [entry.id for entry in store.get_verified_facts()] == [mid.id, low.id]
 
 
+def test_get_verified_facts_ordering_on_exact_timestamp_tie(home, workspace):
+    # v0.4.1: two facts added inside one clock tick share a `created`
+    # timestamp - easy where time.time() granularity is coarse
+    # (notably Windows), and the cause of a one-job CI flake in the
+    # ordering test above. The order must stay deterministic:
+    # confidence desc, then later-appended ("newer") first. The old
+    # sort keys left full ties in file order, oldest first.
+    store = MemoryStore(workspace, home=home)
+    first = store.add_verified("first fact", source="user",
+                               source_location="a.py:1", confidence=0.95)
+    second = store.add_verified("second fact", source="user",
+                                source_location="a.py:2", confidence=0.95)
+    lines = store.project_path.read_text(encoding="utf-8").splitlines()
+    rows = [json.loads(line) for line in lines if line.strip()]
+    for row in rows:
+        row["created"] = 1700000000.0
+    store.project_path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    assert [entry.id for entry in store.entries()] == [second.id, first.id]
+    assert [entry.id for entry in store.get_verified_facts()] == [
+        second.id, first.id]
+
+
 def test_project_context_shows_verified_block_first(home, workspace):
     store = MemoryStore(workspace, home=home)
     store.add("Decision: prefer composition", kind="decision")

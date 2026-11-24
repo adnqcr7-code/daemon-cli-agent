@@ -2,8 +2,11 @@
 
 import asyncio
 import json
+import sys
 import threading
 import time
+
+import pytest
 
 from daemon.agent.reflex import (
     ReflexEngine,
@@ -16,6 +19,16 @@ from daemon.config import Config
 _PATTERN = {"files": ["bug.py"], "symbols": ["add"],
             "tools": ["find_symbols"]}
 _RESULT = "bug.py:1 function add(a, b)"
+
+# The planted-filename injection fixtures create files whose names
+# contain embedded newlines - the attack only exists because POSIX
+# filenames may carry them. Windows forbids control characters in
+# filenames, so the fixture file cannot be created there at all (and
+# the real tools can never emit such lines from real files there).
+_PLANTED_FILENAME = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows forbids control characters in filenames; the "
+           "planted-file fixture is unrepresentable")
 
 
 def _config(**reflex_overrides):
@@ -81,10 +94,14 @@ def test_store_corrupt_file_loads_empty(tmp_path):
 
 def test_store_locking_under_concurrent_writers(tmp_path):
     stores = [ReflexStore(tmp_path), ReflexStore(tmp_path)]
+    errors: list[BaseException] = []
 
     def add_many(store, tag):
-        for index in range(25):
-            store.add(ReflexEntry(result=f"fact {tag} {index}"))
+        try:
+            for index in range(25):
+                store.add(ReflexEntry(result=f"fact {tag} {index}"))
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
 
     threads = [threading.Thread(target=add_many, args=(store, tag))
                for tag, store in enumerate(stores)]
@@ -93,6 +110,11 @@ def test_store_locking_under_concurrent_writers(tmp_path):
     for thread in threads:
         thread.join()
 
+    # A writer that dies mid-loop (the pre-v0.4.1 Windows failure:
+    # PermissionError from the shared tmp path, and lost updates from
+    # the no-op lock) must fail here with the cause, not just shrink
+    # the final count.
+    assert errors == []
     fresh = ReflexStore(tmp_path)
     assert len(fresh.entries()) == 50
 
@@ -610,6 +632,7 @@ def test_references_second_header_cannot_overwrite(tmp_path):
     assert entry.pattern["symbols"] == ["checkout_total"]
 
 
+@_PLANTED_FILENAME
 def test_references_filename_injection_end_to_end(tmp_path):
     # Review 2, N2, with the REAL ReferencesTool: a planted file
     # whose name embeds a newline plus a fake header line, in a repo
@@ -665,6 +688,7 @@ def test_references_filename_injection_end_to_end(tmp_path):
 # ------------------------------------- review 3, N6: parser tool gate
 
 
+@_PLANTED_FILENAME
 def test_find_symbols_filename_injection_cannot_certify_planted(tmp_path):
     # Review 3, N6 (blocker): the references-fallback parser ran over
     # ALL execution-tool output, including find_symbols - a tool with
@@ -713,6 +737,7 @@ def test_find_symbols_filename_injection_cannot_certify_planted(tmp_path):
     assert certified[0].pattern["files"] == ["real.py"]
 
 
+@_PLANTED_FILENAME
 def test_references_body_fragment_for_missing_file_fails_closed(tmp_path):
     # Review 3, N6 (secondary): through genuine references output, a
     # newline-bearing filename could mint extra "file: count" body
@@ -758,6 +783,7 @@ def test_references_body_fragment_for_missing_file_fails_closed(tmp_path):
 # ----------------------- review 4, N7/A7: symbol-line grammar + books
 
 
+@_PLANTED_FILENAME
 def test_find_symbols_prose_tail_fragment_cannot_certify(tmp_path):
     # Review 4, N7 (blocker), proof A3: the symbol-line parser's old
     # shape ("path:digits" + an unrestricted (.*) tail, no path
@@ -799,6 +825,7 @@ def test_find_symbols_prose_tail_fragment_cannot_certify(tmp_path):
     assert "ALL" not in entry.pattern["symbols"]
 
 
+@_PLANTED_FILENAME
 def test_find_symbols_prose_tail_on_real_file_cannot_certify(tmp_path):
     # Review 4, N7, proof A4: same attack, but the fragment names a
     # REAL file, so an existence check alone would keep the prose.
@@ -833,6 +860,7 @@ def test_find_symbols_prose_tail_on_real_file_cannot_certify(tmp_path):
     assert "real.py:9" not in certified[0].result
 
 
+@_PLANTED_FILENAME
 def test_references_fallthrough_fragment_cannot_certify(tmp_path):
     # Review 4, N7, proof B3-real: the planted file is the ONLY
     # referencer, so the fallback parse drops its fragmented body
@@ -894,6 +922,28 @@ def test_references_lsp_ghost_row_is_dropped(tmp_path):
     assert entry.pattern["symbols"] == ["checkout_total"]
 
 
+def test_find_symbols_location_row_is_ignored(tmp_path):
+    # Review 5, R5-2: the symbol parser tried the location-row shape
+    # ("path:line:col") for every tool, so a planted fragment
+    # "real.py:99:99" in find_symbols output bound a real file to a
+    # find_symbols entry. Location rows are a references-LSP shape
+    # only; find_symbols output must not certify through them.
+    # The references control (test_references_lsp_ghost_row_is_dropped)
+    # still certifies the same row shape through references.
+    from daemon.agent.reflex import _parse_symbol_output
+
+    (tmp_path / "real.py").write_text(
+        "def real_fn():\n    return 1\n", encoding="utf-8")
+    assert _parse_symbol_output("real.py:99:99\n", "find_symbols",
+                                tmp_path) is None
+    parsed = _parse_symbol_output("real.py:99:99\n", "references",
+                                  tmp_path)
+    assert parsed is not None
+    assert parsed[0] == ["real.py"]
+    assert parsed[2] == "real.py:99:99"
+
+
+@_PLANTED_FILENAME
 def test_references_fabricated_count_for_real_file_fails_parse(tmp_path):
     # Review 4, A7: a planted fragment naming a REAL but unscanned
     # file ("real.py: 99") passes the existence check - only the
