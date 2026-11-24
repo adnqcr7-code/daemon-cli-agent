@@ -40,6 +40,10 @@ class OptimizationReport:
     failed_tool_calls: int = 0
     failure_loops_detected: int = 0
     verified_facts_used: int = 0
+    reflex_firings: int = 0
+    reflex_follows: int = 0
+    reflex_overrides: int = 0
+    reflex_quarantines: int = 0
     files_changed: int = 0
     verification_passed: bool | None = None
     estimated_cost_usd: float | None = None
@@ -68,6 +72,10 @@ class OptimizationReport:
             "failed_tool_calls": self.failed_tool_calls,
             "failure_loops_detected": self.failure_loops_detected,
             "verified_facts_used": self.verified_facts_used,
+            "reflex_firings": self.reflex_firings,
+            "reflex_follows": self.reflex_follows,
+            "reflex_overrides": self.reflex_overrides,
+            "reflex_quarantines": self.reflex_quarantines,
             "files_changed": self.files_changed,
             "verification_passed": self.verification_passed,
             "estimated_cost_usd": self.estimated_cost_usd,
@@ -112,6 +120,14 @@ class OptimizationReport:
             f"Cost: {cost}",
             f"Duration: {self.duration_s:.2f}s",
         ]
+        if (self.reflex_firings or self.reflex_follows
+                or self.reflex_overrides or self.reflex_quarantines):
+            lines.insert(
+                -2,
+                f"Reflex: {self.reflex_firings} firing(s) · "
+                f"{self.reflex_follows} followed · "
+                f"{self.reflex_overrides} override(s) · "
+                f"{self.reflex_quarantines} quarantine(s)")
         return "\n".join(lines)
 
 
@@ -132,6 +148,10 @@ class OptimizationReporter:
         self._failed_tool_calls = 0
         self._failure_loops_detected = 0
         self._verified_facts_used = 0
+        self._reflex_firings = 0
+        self._reflex_follows = 0
+        self._reflex_overrides = 0
+        self._reflex_quarantines = 0
         self._files_changed = 0
         self._verification_passed: bool | None = None
         self._estimated_cost_usd: float | None = None
@@ -165,6 +185,15 @@ class OptimizationReporter:
     def record_verified_facts(self, count: int) -> None:
         self._verified_facts_used += max(0, int(count))
 
+    def record_reflex(self, firings: int, follows: int, overrides: int,
+                      quarantines: int) -> None:
+        """Record reflex event counters (design v4 section 3.6: events,
+        never per-fact token estimates)."""
+        self._reflex_firings += max(0, int(firings))
+        self._reflex_follows += max(0, int(follows))
+        self._reflex_overrides += max(0, int(overrides))
+        self._reflex_quarantines += max(0, int(quarantines))
+
     def set_usage(self, input_tokens: int, output_tokens: int,
                   cost_usd: float | None = None) -> None:
         """Set the session's provider-reported usage totals."""
@@ -195,6 +224,10 @@ class OptimizationReporter:
             failed_tool_calls=self._failed_tool_calls,
             failure_loops_detected=self._failure_loops_detected,
             verified_facts_used=self._verified_facts_used,
+            reflex_firings=self._reflex_firings,
+            reflex_follows=self._reflex_follows,
+            reflex_overrides=self._reflex_overrides,
+            reflex_quarantines=self._reflex_quarantines,
             files_changed=self._files_changed,
             verification_passed=self._verification_passed,
             estimated_cost_usd=self._estimated_cost_usd,

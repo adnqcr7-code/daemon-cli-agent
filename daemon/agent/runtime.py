@@ -40,6 +40,7 @@ from .context import (
 from .failure_detector import FailureLoopDetector
 from .optimizer import ContextOptimizer
 from .prompts import build_system_prompt
+from .reflex import ReflexEngine, ReflexTrajectory
 from .session import Session
 from .tool_selector import ToolSelector
 
@@ -143,6 +144,8 @@ class AgentRuntime:
         self._optimization_enabled = config.get("optimization.enabled", True) if config else True
         self.tool_selector = ToolSelector(config)
         self.failure_detector = FailureLoopDetector(config)
+        self.reflex = ReflexEngine(config, workspace=self.workspace)
+        self._reflex_notice: str | None = None
         self._current_task = ""
         self._tool_prune_reported = False
         self._failure_nudge: str | None = None
@@ -168,6 +171,7 @@ class AgentRuntime:
         self._failed_tool_calls = 0
         self._failure_loops = 0
         self._verification_passed = None
+        self.reflex.begin_turn()
         max_turns = self.config.max_turns() if self.config else 40
         repair_attempts = 0
         if self.config is not None:
@@ -249,6 +253,11 @@ class AgentRuntime:
 
     async def _stream_once(self) -> tuple[str, list[ToolCall] | None, Usage | None]:
         request = self._build_request()
+        if self._reflex_notice:
+            await self.ui.notice(
+                f"Reflex signal offered: {self._reflex_notice}",
+                level="debug")
+            self._reflex_notice = None
         text_parts: list[str] = []
         thinking_parts: list[str] = []
         tool_calls: list[ToolCall] | None = None
@@ -284,13 +293,50 @@ class AgentRuntime:
         if self._failure_nudge:
             system += f"\n\nFailure-loop intervention: {self._failure_nudge}"
             self._failure_nudge = None
+        messages = list(self.session.messages)
+        # Reflex soft signal (design v4 section 3.1): appended to the
+        # conversation TAIL of this request copy only - never written to
+        # the session transcript and never into the system prompt, so the
+        # cached prefix (system + history) stays byte-stable.
+        self._reflex_notice = None
+        try:
+            signal = self.reflex.analyze(self._reflex_trajectory())
+        except Exception as exc:  # noqa: BLE001 - a reflex failure must
+            # never break the run (review finding 8); the engine's own
+            # methods already fail silent, this guards the trajectory
+            # build that runs outside them.
+            _logger.debug("reflex trajectory failed: %s", exc)
+            signal = None
+        if signal is not None:
+            messages.append(Message.user(signal.note))
+            self._reflex_notice = signal.note
         return ChatRequest(
             model=self.model.model_id,
-            messages=list(self.session.messages),
+            messages=messages,
             tools=self._tool_specs(),
             system=system,
             stream=True,
         )
+
+    def _reflex_trajectory(self) -> ReflexTrajectory:
+        """The agent's recent trajectory, from the session as it stands."""
+        calls: list = []
+        files: list[str] = []
+        texts: list[str] = []
+        for msg in self.session.messages[-24:]:
+            if msg.text and msg.role in ("user", "assistant"):
+                texts.append(msg.text)
+            for call in msg.tool_calls:
+                calls.append((call.name, call.arguments or {}))
+                for key in ("path", "target"):
+                    value = (call.arguments or {}).get(key)
+                    if isinstance(value, str) and value not in files:
+                        files.append(value)
+        return ReflexTrajectory(
+            task_text=self._current_task or "",
+            recent_text="\n".join(texts[-3:]),
+            tool_calls=calls[-20:],
+            files=files)
 
     # ------------------------------------------------------------- execution
 
@@ -361,6 +407,8 @@ class AgentRuntime:
             self._failed_tool_calls += 1
             self.failure_detector.record(call.name, call.arguments, message,
                                          is_error=True)
+            self.reflex.record_tool_result(call.name, call.arguments,
+                                           message, is_error=True)
             return ToolResult(tool_call_id=call.id, tool_name=call.name,
                               content=message, is_error=True)
         output = await self.registry.execute(call.name, call.arguments,
@@ -370,6 +418,9 @@ class AgentRuntime:
         self.tool_selector.record_use(call.name)
         self.failure_detector.record(call.name, call.arguments, output.content,
                                      is_error=output.is_error)
+        self.reflex.record_tool_result(call.name, call.arguments,
+                                       output.content,
+                                       is_error=output.is_error)
         if not output.is_error and call.name in _FILE_TOOLS:
             path = output.metadata.get("path")
             if path and path not in result.files_changed:
@@ -499,6 +550,12 @@ class AgentRuntime:
                 reporter.record_tool_call(failed=True)
             for _ in range(self._failure_loops):
                 reporter.record_failure_loop()
+            self.reflex.flush_pending()
+            reflex_stats = self.reflex.stats
+            reporter.record_reflex(reflex_stats.firings,
+                                   reflex_stats.follows,
+                                   reflex_stats.overrides,
+                                   reflex_stats.quarantines)
             if self.memory is not None:
                 try:
                     reporter.record_verified_facts(
