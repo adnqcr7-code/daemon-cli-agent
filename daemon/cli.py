@@ -8,7 +8,7 @@ Commands:
   daemon run / plan / review / research
   daemon design ... / build from <design-url>
   daemon tools / agents / mcp / sessions / memory / config
-  daemon worktree / repomap / optimize
+  daemon worktree / repomap / optimize / reflex
   daemon doctor              environment diagnostics
   daemon version
 """
@@ -1068,6 +1068,77 @@ def memory_invalidate(entry_id: str, reason: str,
         _echo(f"Invalidated {entry_id}: {reason}", color="green")
     else:
         _echo(f"No memory entry {entry_id}.", color="yellow")
+
+
+@main.group()
+def reflex() -> None:
+    """Inspect and manage reflex entries (certified project facts)."""
+
+
+def _reflex_store(workspace: Path | None):
+    from .agent.reflex import ReflexStore
+
+    return ReflexStore(workspace or Path.cwd())
+
+
+def _reflex_line(entry) -> str:
+    cert = ""
+    if entry.status == "certified":
+        cert = f" ({entry.certification.get('method', '?')})"
+    counts = (f" fires={entry.fires} follows={entry.follows} "
+              f"overrides={entry.overrides}")
+    return (f"[{entry.id}] {entry.status}{cert} "
+            f"{entry.result.splitlines()[0][:90]}{counts}")
+
+
+@reflex.command("list")
+@click.option("--workspace", "-w", type=click.Path(file_okay=False,
+                                                   path_type=Path), default=None)
+def reflex_list(workspace: Path | None) -> None:
+    """List all reflex entries: certified, proposals, quarantined."""
+    entries = _reflex_store(workspace).entries()
+    if not entries:
+        _echo("No reflex entries yet. Certified facts appear here after "
+              "the agent establishes them by execution, or after you "
+              "approve a proposal with `daemon reflex approve <id>`.")
+        return
+    for entry in entries[:40]:
+        _echo(_reflex_line(entry))
+
+
+@reflex.command("proposals")
+@click.option("--workspace", "-w", type=click.Path(file_okay=False,
+                                                   path_type=Path), default=None)
+def reflex_proposals(workspace: Path | None) -> None:
+    """List unverified proposals (these never fire signals)."""
+    entries = _reflex_store(workspace).entries(status="proposal")
+    if not entries:
+        _echo("No pending reflex proposals.")
+        return
+    for entry in entries[:40]:
+        _echo(_reflex_line(entry))
+
+
+@reflex.command("approve")
+@click.argument("entry_id")
+@click.option("--workspace", "-w", type=click.Path(file_okay=False,
+                                                   path_type=Path), default=None)
+def reflex_approve(entry_id: str, workspace: Path | None) -> None:
+    """Certify a proposal by explicit user approval."""
+    if _reflex_store(workspace).approve(entry_id):
+        _echo(f"Certified reflex entry {entry_id} (user approval).",
+              color="green")
+    else:
+        _echo(f"No pending proposal {entry_id}.", color="yellow")
+
+
+@reflex.command("purge")
+@click.option("--workspace", "-w", type=click.Path(file_okay=False,
+                                                   path_type=Path), default=None)
+def reflex_purge(workspace: Path | None) -> None:
+    """Delete every reflex entry for the project."""
+    count = _reflex_store(workspace).clear()
+    _echo(f"Purged {count} reflex entries", color="green")
 
 
 @main.group()

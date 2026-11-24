@@ -135,6 +135,15 @@ DEFAULTS: dict[str, Any] = {
             "max_failures": 3,
             "window_turns": 10,
         },
+        "reflex": {
+            "enabled": True,
+            # Phase 2 fence (design v4 section 3.2): deterministic
+            # artifact serves are not implemented in Phase 1; the key
+            # exists so projects can pin the intended value now.
+            "hard_signals": False,
+            "max_signals_per_turn": 1,
+            "entry_ttl_days": None,
+        },
         "memory": {
             "verified_facts_in_prompt": False,
             "max_verified_facts": 10,
