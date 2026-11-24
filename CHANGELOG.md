@@ -5,6 +5,40 @@ The format follows Keep a Changelog; versioning is semantic.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-23
+
+Reflex Phase 1 (design v4): soft signals over certified project facts.
+
+### Added
+
+- **Reflex engine** (`daemon/agent/reflex.py`): a dedicated store
+  (`.daemon/reflex.json`, flock-ed writes, in-memory index — not
+  MemoryStore) plus a failure-detector-idiom engine that watches the
+  agent's trajectory and offers certified structural facts back as one
+  short `[reflex]` note appended to the conversation tail at request
+  build. The system prompt is never mutated by a firing (prompt-cache
+  invariant, covered by an explicit test), and the note is never
+  written into the session transcript.
+- **Certification gate**: an entry is certified only by execution of
+  the claim (codeintel tool output that *is* the fact, recorded with
+  its provenance), by two independent derivations agreeing, or by
+  explicit user approval. Everything else is an unverified proposal
+  that can never fire. Live/time-indexed claims can never certify.
+  Reflex entries cannot be minted through `daemon memory
+  add-verified` — the reflex store has its own write paths only.
+- **Quarantine on disagreement**: a certified entry contradicted by a
+  later tool result, or bound to a file that changed, stops firing
+  immediately pending re-certification or a user decision.
+- **`daemon reflex list|proposals|approve <id>|purge`**: inspect every
+  entry and its counters, approve proposals, purge the store.
+- **Reflex reporting**: per-session optimization reports gain event
+  counters — firings, followed-by-no-read, overrides, quarantines
+  (events only; no per-fact token accounting, by design).
+- Config under `optimization.reflex.*` (`enabled`,
+  `max_signals_per_turn`, `entry_ttl_days`, and `hard_signals`,
+  default false — deterministic artifact serves are Phase 2 and are
+  not implemented; no tool result is ever substituted).
+
 ## [0.3.0] - 2026-11-23
 
 Tier 1: worktree isolation, a ranked repo map, verified memory with
