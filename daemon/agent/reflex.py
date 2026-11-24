@@ -54,10 +54,15 @@ from ..config import Config, project_dir
 from ..log import audit, get_logger
 from ..security import redact
 
-try:  # POSIX locking; on platforms without fcntl, writes are unlocked.
+try:  # POSIX locking for the reflex store.
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX platforms
     fcntl = None  # type: ignore[assignment]
+
+try:  # Windows locking fallback (msvcrt is stdlib on Windows only).
+    import msvcrt
+except ImportError:  # pragma: no cover - non-Windows platforms
+    msvcrt = None  # type: ignore[assignment]
 
 _logger = get_logger("reflex")
 
@@ -355,17 +360,38 @@ class ReflexStore:
 
     @contextlib.contextmanager
     def _locked(self):
-        if self.path is None or fcntl is None:
+        if self.path is None or (fcntl is None and msvcrt is None):
             yield
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.path.with_suffix(".lock"),
                      os.O_CREAT | os.O_RDWR, 0o644)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            else:
+                # Windows (v0.4.1): byte-range lock on the same lock
+                # file via msvcrt. The lock is per-handle, so separate
+                # store instances - threads, processes - serialize
+                # exactly as flock serializes them on POSIX; before
+                # this, _locked was a no-op on Windows and concurrent
+                # read-modify-write cycles silently lost entries.
+                # LK_LOCK retries inside the call (~10s) before
+                # raising. The file needs one byte to lock against.
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
     def _mutate(self, fn) -> object:
@@ -397,9 +423,35 @@ class ReflexStore:
         payload = {"version": 1,
                    "entries": [entry.to_json()
                                for entry in self._entries.values()]}
-        tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
-        os.replace(tmp, self.path)
+        # Unique tmp name per write (v0.4.1): the old shared
+        # ".json.tmp" path made concurrent writers collide on one
+        # file - on Windows the second writer's write raised
+        # PermissionError (sharing violation) before replace was
+        # even reached. pid + uuid makes collisions impossible, and
+        # the handle is closed before replace (Windows cannot
+        # replace over an open handle).
+        tmp = self.path.parent / (
+            f"{self.path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, indent=1))
+            # Windows os.replace also fails while another handle has
+            # the destination open (a concurrent reader in _mutate /
+            # load). POSIX replace is atomic and does not care, so
+            # the retry only ever engages on Windows: bounded, and
+            # only on PermissionError.
+            for attempt in range(10):
+                try:
+                    os.replace(tmp, self.path)
+                    break
+                except PermissionError:
+                    if attempt == 9:
+                        raise
+                    time.sleep(0.05)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
 
     def add(self, entry: ReflexEntry) -> ReflexEntry:
         def _add(entries: dict) -> ReflexEntry:
@@ -1173,6 +1225,13 @@ def _parse_symbol_output(content: str, tool_name: str,
                       f"{match.group('kind')} {name}"
                       f"{match.group('signature') or ''}")
         else:
+            # Review 5, R5-2: a location row ("path:line:col") is a
+            # references-LSP shape only. The symbol parser tried it
+            # for every tool, so a planted fragment "real.py:99:99"
+            # in find_symbols output bound a real file to a
+            # find_symbols entry. Gate the row branch to references.
+            if tool_name != "references":
+                continue
             row = _LOCATION_ROW.match(line)
             if row is None:
                 continue
