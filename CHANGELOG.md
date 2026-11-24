@@ -5,6 +5,44 @@ The format follows Keep a Changelog; versioning is semantic.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-24
+
+Windows fixes. CI for 0.4.0 was green on Linux and macOS but failed
+on windows-latest; this release fixes what those runs exposed.
+
+### Fixed
+
+- **Reflex store locking on Windows**: `ReflexStore._locked` was a
+  no-op on platforms without `fcntl`, so concurrent writers raced
+  their read-modify-write cycles and silently lost entries (a
+  two-writer test kept only 25 of 50). The store now serializes on
+  Windows with an `msvcrt` byte-range lock on the same lock file,
+  saves go to a per-write unique tmp file (the old shared tmp path
+  collided - `PermissionError` inside the write, before replace),
+  and `os.replace` retries briefly while a concurrent reader holds
+  the destination open. POSIX behavior is unchanged.
+- **Verified-facts ordering on timestamp ties**: `MemoryStore`
+  sorted `entries()` / `get_verified_facts()` on timestamps alone,
+  so facts created inside one clock tick - easy where `time.time()`
+  granularity is coarse, notably Windows - came back oldest-first,
+  against the documented newest-first order. Both orderings are now
+  total (a tie goes to the later-appended entry), hence
+  deterministic on every platform.
+- **Location rows gated to references** (review 5, R5-2): the reflex
+  symbol parser no longer accepts `path:line:col` location rows
+  from `find_symbols` output; that shape is a references-LSP shape
+  only.
+
+### Tests
+
+- The seven planted-filename injection tests are skipped on
+  Windows: filenames there cannot contain control characters, so
+  the fixture is unrepresentable (and the real tools can never emit
+  such lines from real files). POSIX coverage is unchanged.
+- The concurrent-writer store test now also asserts that no writer
+  thread raised, and a regression test pins verified-facts ordering
+  on exact timestamp ties.
+
 ## [0.4.0] - 2026-11-23
 
 Reflex Phase 1 (design v4): soft signals over certified project facts.
