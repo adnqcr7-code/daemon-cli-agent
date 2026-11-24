@@ -149,13 +149,27 @@ class MemoryStore:
                 _logger.warning("corrupt memory line in %s: %s", path, exc)
         if not include_invalidated:
             results = [entry for entry in results if not entry.invalidated]
-        return sorted(results, key=lambda entry: -entry.created)
+        # Newest first, as a total order (v0.4.1): entries are read in
+        # append order, so the read index breaks exact `created` ties
+        # toward the later-appended entry. Sorting on -created alone
+        # left ties in file order (oldest first) - and two adds inside
+        # one clock tick tie easily where time.time() granularity is
+        # coarse (notably Windows), which made the order - and every
+        # consumer built on it - nondeterministic.
+        ordered = sorted(enumerate(results),
+                         key=lambda pair: (-pair[1].created, -pair[0]))
+        return [entry for _index, entry in ordered]
 
     def get_verified_facts(self, limit: int = 20) -> list[MemoryEntry]:
         """Verified, non-invalidated facts, confidence desc then newest."""
         facts = [entry for entry in self.entries()
                  if entry.verified or entry.kind == "verified_fact"]
-        facts.sort(key=lambda entry: (-entry.confidence, -entry.created))
+        # entries() is already newest-first as a total order, so a
+        # stable sort on confidence alone yields confidence desc,
+        # then newest - deterministically, including on exact
+        # timestamp ties (the old (-confidence, -created) key fell
+        # back to oldest-first file order there).
+        facts.sort(key=lambda entry: -entry.confidence)
         return facts[:limit]
 
     def find_contradictions(self, content: str, *,
