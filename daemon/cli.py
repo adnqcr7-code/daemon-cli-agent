@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -24,7 +25,7 @@ import click
 
 from . import __version__
 from .config import Config, daemon_home
-from .errors import DaemonError
+from .errors import AuthError, DaemonError
 from .log import get_logger, setup_logging
 from .security import redact
 
@@ -85,10 +86,13 @@ def _fail(exc: DaemonError) -> None:
 
 
 def _make_renderer(config: Config, *, plain: bool = False, theme: str | None = None):
+    from .diffs import diff_budget_from_config
     from .ui.render import Renderer
     from .ui.themes import resolve_theme
 
-    return Renderer(resolve_theme(theme or config.theme_name()), plain=plain)
+    max_lines, max_tokens = diff_budget_from_config(config)
+    return Renderer(resolve_theme(theme or config.theme_name()), plain=plain,
+                    diff_max_lines=max_lines, diff_max_tokens=max_tokens)
 
 
 def _echo(message: str, *, color: str | None = None) -> None:
@@ -112,6 +116,16 @@ def _echo(message: str, *, color: str | None = None) -> None:
 def main(ctx: click.Context, workspace: Path | None, model: str | None,
          theme: str | None, session: str | None, plain: bool) -> None:
     """Daemon - the open-source AI engineering agent for your terminal."""
+    # Logging (and with it the audit trail) is initialised at the CLI
+    # entry, before ANY command runs - not only on paths that build a
+    # context - so permission decisions can never fall into an
+    # uninitialised audit() no-op during a real run (v0.5.0 §3).
+    try:
+        setup_logging(daemon_home())
+    except OSError as exc:
+        from .log import mark_audit_unavailable
+
+        mark_audit_unavailable(f"{type(exc).__name__}: {exc}")
     if ctx.invoked_subcommand is not None:
         return
     _launch_repl(workspace=workspace, model=model, theme=theme,
@@ -145,17 +159,43 @@ def _launch_repl(*, workspace: Path | None, model: str | None, theme: str | None
                     "releases/latest)"
                 )
         renderer = _make_renderer(config, plain=plain, theme=theme)
-        ctx = build_context(workspace=workspace, config=config,
-                            renderer=renderer, interactive=True,
-                            session_id=session_id, model_id=model,
-                            role="research" if research else "build")
+        try:
+            ctx = build_context(workspace=workspace, config=config,
+                                renderer=renderer, interactive=True,
+                                session_id=session_id, model_id=model,
+                                role="research" if research else "build")
+        except AuthError:
+            # Front door (v0.9.0 §2.2): a fresh install with no
+            # credentials still gets a working REPL, on the scripted
+            # demo provider, instead of dying on AuthError. The demo
+            # is offered up front by the REPL (per-run, never saved
+            # as a profile); nothing here writes a credential.
+            click.secho(
+                "No credentials configured — starting in demo mode "
+                "(scripted demo provider: no API key, no network). "
+                "Run 'daemon auth add' to use a real model.",
+                fg="yellow")
+            ctx = build_context(workspace=workspace, config=config,
+                                renderer=renderer, interactive=True,
+                                session_id=session_id, model_id=model,
+                                profile_id="demo", require_auth=False,
+                                role="research" if research else "build")
+            demo_mode = True
+        else:
+            demo_mode = False
+        if ctx.session is not None and ctx.session.resumed_interrupted:
+            click.secho(
+                "This session's previous run was interrupted mid-run "
+                "(the process died); resuming from the last completed "
+                "turn in its journal.", fg="yellow")
     except DaemonError as exc:
         _fail(exc)
     try:
         if research:
             run_research_repl(ctx, renderer)
         else:
-            Repl(ctx, renderer, initial_prompt=initial_prompt).start()
+            Repl(ctx, renderer, initial_prompt=initial_prompt,
+                 demo_mode=demo_mode).start()
     except DaemonError as exc:
         _fail(exc)
     finally:
@@ -173,19 +213,23 @@ def _launch_repl(*, workspace: Path | None, model: str | None, theme: str | None
 @main.command()
 @click.argument("path", type=click.Path(file_okay=False), default=".")
 def init(path: str) -> None:
-    """Initialize .daemon/ project state (config, memory, skills)."""
+    """Initialize .daemon/ project state (config, memory, skills).
+
+    Idempotent and non-destructive: files that already exist are
+    never overwritten (a project that customized its config or
+    AGENTS.md keeps its own words), and missing pieces are added.
+    """
     workspace = Path(path).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     daemon_dir = workspace / ".daemon"
-    for sub in ("memory", "skills", "checkpoints"):
+    for sub in ("memory", "skills", "checkpoints", "plans"):
         (daemon_dir / sub).mkdir(parents=True, exist_ok=True)
     config_path = daemon_dir / "config.toml"
     if not config_path.exists():
-        config_path.write_text(
-            "# Daemon project configuration.\n"
-            "# Docs: https://github.com/adnqcr7-code/daemon-cli-agent "
-            "docs/configuration.md\n",
-            encoding="utf-8")
+        config_path.write_text(_INIT_CONFIG, encoding="utf-8")
+    agents_path = workspace / "AGENTS.md"
+    if not agents_path.exists():
+        agents_path.write_text(_INIT_AGENTS_MD, encoding="utf-8")
     gitignore = workspace / ".gitignore"
     entry = ".daemon/checkpoints/\n"
     if gitignore.exists():
@@ -200,6 +244,59 @@ def init(path: str) -> None:
     index.build()
     _echo(f"Initialized {daemon_dir}", color="green")
     _echo(index.summary())
+
+
+# Commented project config written by `daemon init`. Everything is a
+# comment, so a fresh project runs on defaults; uncomment a line to
+# change it. The filename is the codebase's real one: project config
+# is read from .daemon/config.toml (see Config.load).
+_INIT_CONFIG = """\
+# Daemon project configuration.
+# Docs: https://github.com/adnqcr7-code/daemon-cli-agent/blob/main/docs/configuration.md
+# Uncomment a line to change it; everything below is a default.
+
+# Default model for this project (provider id + model id).
+# [model]
+# provider = "anthropic"
+# default = "claude-sonnet-4-5"
+
+# Permission rules: first match wins; ALLOW / ASK / DENY.
+# [[permissions.rules]]
+# tool = "shell"
+# command = "rm -rf *"
+# effect = "deny"
+
+# Shell sandbox: off by default; set true to run shell commands
+# inside the sandbox backend (container when available, else bwrap).
+# [sandbox]
+# shell = false
+
+# Reflex: the kernel watches thinking and injects pre-built answers
+# for certified structural facts. Hard signals stay off.
+# [optimization.reflex]
+# enabled = true
+# hard_signals = false
+
+# Limits.
+# [limits]
+# max_cost_usd = 5.0
+# tool_timeout_s = 120
+"""
+
+# Standing instructions for the agent in this project, written by
+# `daemon init`. The user edits this file; init never overwrites it.
+_INIT_AGENTS_MD = """\
+# AGENTS.md
+
+Standing instructions for Daemon in this project. Edit freely —
+`daemon init` never overwrites this file.
+
+- Work in this repository only; do not touch files outside it.
+- Before changing code, read the files you plan to touch.
+- Run the project's tests before finishing a task.
+- Ask before anything destructive (deleting files, force-pushing,
+  publishing, spending money).
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +421,77 @@ def auth_models(profile_id: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# providers
+# ---------------------------------------------------------------------------
+
+
+@main.group()
+def providers() -> None:
+    """Inspect provider capabilities."""
+
+
+@providers.command("list")
+@click.option("--json", "as_json", is_flag=True,
+              help="Machine-readable output")
+def providers_list(as_json: bool) -> None:
+    """List every catalogued provider with its capability manifest."""
+    from .providers.catalog import iter_providers
+    from .providers.manifest import manifest_for
+
+    manifests = [manifest_for(descriptor.id)
+                 for descriptor in iter_providers()]
+    if as_json:
+        click.echo(json.dumps(
+            [manifest.to_json() for manifest in manifests if manifest],
+            indent=2))
+        return
+    for manifest in manifests:
+        if manifest is None:
+            continue
+        tools = ("tools" if manifest.tool_calling else
+                 "no tools" if manifest.tool_calling is False else
+                 "tools unknown")
+        reasoning = manifest.reasoning_mode or "reasoning unknown"
+        click.echo(f"{manifest.provider_id:<14} {manifest.provider_name} "
+                   f"({manifest.protocol}) — {tools}, {reasoning}")
+
+
+@providers.command("show")
+@click.argument("provider_id")
+@click.option("--model", "model_id", default=None,
+              help="Merge in one model's record (context window, pricing)")
+@click.option("--json", "as_json", is_flag=True,
+              help="Machine-readable output")
+def providers_show(provider_id: str, model_id: str | None,
+                   as_json: bool) -> None:
+    """Show the capability manifest for one provider."""
+    from .providers.manifest import manifest_for
+
+    manifest = manifest_for(provider_id, model_id)
+    if manifest is None:
+        raise click.ClickException(f"Unknown provider: {provider_id}")
+    if as_json:
+        click.echo(json.dumps(manifest.to_json(), indent=2))
+        return
+    click.echo(f"{manifest.provider_name} ({manifest.provider_id}, "
+               f"{manifest.protocol})")
+    if manifest.model_id:
+        click.echo(f"model: {manifest.model_id}")
+    for label, value in (
+            ("context window", manifest.context_window),
+            ("tool calling", manifest.tool_calling),
+            ("parallel tool calls", manifest.parallel_tool_calls),
+            ("reasoning", manifest.reasoning),
+            ("reasoning mode", manifest.reasoning_mode),
+            ("reasoning trace field", manifest.reasoning_trace_field),
+            ("max output tokens", manifest.max_output_tokens),
+            ("prompt-cache TTL (s)", manifest.cache_ttl_seconds),
+            ("input price / Mtok", manifest.input_price_per_mtok),
+            ("output price / Mtok", manifest.output_price_per_mtok)):
+        click.echo(f"  {label}: {value if value is not None else 'unknown'}")
+
+
+# ---------------------------------------------------------------------------
 # models
 # ---------------------------------------------------------------------------
 
@@ -396,21 +564,193 @@ def models_set(role: str, model_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _run_create_plan(goal: str, model: str | None, profile: str | None,
+                     workspace: Path | None, assume_yes: bool) -> None:
+    """`daemon run --plan <goal>`: draft the plan, persist it, STOP."""
+    from .context import build_context
+    from .plans import PlanStore, draft_plan
+
+    config = Config.load(workspace)
+    try:
+        ctx = build_context(workspace=workspace, config=config,
+                            interactive=False, assume_yes=assume_yes,
+                            model_id=model, profile_id=profile)
+    except DaemonError as exc:
+        _fail(exc)
+    try:
+        record = asyncio.run(draft_plan(ctx, goal, created_by="cli"))
+    except DaemonError as exc:
+        _fail(exc)
+    finally:
+        ctx.close()
+    store = PlanStore(ctx.workspace)
+    _echo(f"plan {record.id} created (not executed)", color="green")
+    _echo(f"  file: {store.path_for(record)}")
+    for task in record.tasks:
+        _echo(f"  {task.id}. {task.title}")
+    _echo("Edit it with: "
+          f"daemon plan --edit {record.id} (the edit is recorded in "
+          f"the event kernel)")
+    _echo(f"Then execute with: daemon run --execute-plan {record.id}")
+    _echo("The plan is re-validated before it runs; only edits "
+          "recorded with `daemon plan --edit` (or /edit-plan in the "
+          "REPL) are honored — a file rewritten any other way is "
+          "refused, forged hash or not.")
+
+
+def _run_execute_plan(plan_id: str, model: str | None, profile: str | None,
+                      workspace: Path | None, assume_yes: bool,
+                      as_json: bool) -> None:
+    """`daemon run --execute-plan <id>`: load, re-hash, broker-approve,
+    execute."""
+    from .agent.planner import TaskTracker
+    from .agent.runtime import AgentUI
+    from .context import attach_mcp_tools, build_context
+    from .events import emit_plan_approved
+    from .plans import PlanError, PlanStore, run_plan_tasks, verify_approved
+
+    config = Config.load(workspace)
+    store = PlanStore(workspace or Path.cwd())
+    try:
+        record = store.load(plan_id)
+    except DaemonError as exc:
+        _fail(exc)
+    try:
+        ctx = build_context(workspace=workspace, config=config,
+                            interactive=False, assume_yes=assume_yes,
+                            model_id=model, profile_id=profile)
+    except DaemonError as exc:
+        _fail(exc)
+    if as_json:
+        ui = AgentUI()  # silent: --json emits machine-readable output only
+        approver = None  # no prompt in --json mode: the gate refuses
+    else:
+        ui = _make_renderer(config, plain=not sys.stdout.isatty())
+        approver = ui.approve
+    ctx.renderer = ui
+    approved = ctx.permissions.approve_plan(
+        plan_id=record.id, goal=record.goal, task_count=len(record.tasks),
+        files=[file for task in record.tasks for file in task.files],
+        plan_hash=record.hash, tasks=list(record.tasks), approver=approver)
+    if not approved:
+        if as_json:
+            click.echo(json.dumps({"ok": False, "plan": record.id,
+                                   "error": "plan execution not approved"}))
+        else:
+            _echo("plan execution not approved — nothing ran.",
+                  color="yellow")
+        ctx.close()
+        raise SystemExit(1)
+    # The approval binds to the kernel record (review round 1,
+    # R1-3a): the hash is recorded under DAEMON_HOME, outside the
+    # workspace, and the file is re-read and checked against it
+    # before anything executes — a forged plan with a recomputed
+    # self-stored hash, or an edit after approval, refuses here.
+    # An approval the kernel could not record is no approval.
+    seq = emit_plan_approved(ctx.session.meta.id, record.plan,
+                             via="run --execute-plan",
+                             plan_id=record.id, plan_hash=record.hash)
+    if seq is None:
+        ctx.close()
+        _fail(PlanError(
+            "plan approval could not be recorded in the event "
+            "kernel — refusing to execute"))
+    try:
+        record = store.load(plan_id)
+        verify_approved(record)
+    except DaemonError as exc:
+        ctx.close()
+        _fail(exc)
+    runtime = ctx.build_runtime(ui=ui)
+    tracker = TaskTracker()
+    tracker.load(record.plan)
+    try:
+        asyncio.run(attach_mcp_tools(ctx, renderer=ui))
+        done = asyncio.run(
+            run_plan_tasks(runtime, tracker, renderer=ui))
+    except DaemonError as exc:
+        _fail(exc)
+    finally:
+        ctx.close()
+    if as_json:
+        click.echo(json.dumps({
+            "ok": done, "plan": record.id,
+            "tasks": [{"id": task.id, "title": task.title,
+                       "status": task.status} for task in tracker.plan.tasks],
+        }, indent=2))
+    else:
+        _echo("plan executed: all tasks done"
+              if done else "plan stopped early: a task failed",
+              color="green" if done else "yellow")
+    raise SystemExit(0 if done else 1)
+
+
 @main.command()
-@click.argument("task")
+@click.argument("task", required=False)
 @click.option("--model", "-m", default=None)
 @click.option("--profile", default=None,
               help="Credential profile to use without changing the active profile")
+@click.option("--provider", default=None,
+              help="Credential-less built-in provider: 'demo' (scripted, "
+                   "not a real model) - runs offline with no API key")
+@click.option("--plan", "plan_create", is_flag=True,
+              help="Plan mode: create a plan from TASK and stop "
+                   "(execute it later with --execute-plan)")
+@click.option("--execute-plan", "plan_execute", default=None,
+              help="Execute a stored plan by id (broker approval required)")
 @click.option("--yes", "assume_yes", is_flag=True,
               help="Assume-yes for permission prompts (CI/scripting)")
 @click.option("--json", "as_json", is_flag=True, help="Structured output")
 @click.option("--worktree", is_flag=True,
               help="Run in an isolated git worktree on a daemon/<task> branch")
 @_workspace_option
-def run(task: str, model: str | None, profile: str | None, assume_yes: bool,
-        as_json: bool, worktree: bool, workspace: Path | None) -> None:
+def run(task: str | None, model: str | None, profile: str | None,
+        assume_yes: bool, as_json: bool, worktree: bool,
+        workspace: Path | None, provider: str | None = None,
+        plan_create: bool = False,
+        plan_execute: str | None = None) -> None:
     """Run one task non-interactively, then exit."""
     from .context import attach_mcp_tools, build_context
+
+    if provider is not None:
+        if provider != "demo":
+            raise click.UsageError(
+                f"--provider only supports 'demo' (the scripted built-in); "
+                f"use --profile for stored credentials, not '{provider}'.")
+        if profile is not None:
+            raise click.UsageError("--provider demo cannot be combined "
+                                   "with --profile.")
+        profile = "demo"  # reserved profile id: see context.build_context
+
+    if plan_create or plan_execute is not None:
+        # Plan mode (§2.3): create persists and STOPS; execute is a
+        # separate invocation through the broker gate. --yes never
+        # substitutes for plan approval (see approve_plan).
+        # NOTE: the spec's single-option spelling `daemon run --plan
+        # <id>` is unimplementable with the pinned click 8.5.1 —
+        # flag_value never consumes a value, nargs="?" without const
+        # crashes inside click, and Option rejects const — so create
+        # and execute are two options with the same semantics.
+        if plan_create and plan_execute is not None:
+            raise click.UsageError(
+                "--plan and --execute-plan cannot be combined.")
+        if worktree:
+            raise click.UsageError(
+                "--plan/--execute-plan cannot be combined with --worktree.")
+        if plan_create:
+            if not task:
+                raise click.UsageError(
+                    "--plan needs a goal: daemon run --plan '<goal>'")
+            _run_create_plan(task, model, profile, workspace, assume_yes)
+            return
+        if task:
+            raise click.UsageError(
+                "--execute-plan <id> takes no TASK argument.")
+        _run_execute_plan(plan_execute, model, profile, workspace,
+                          assume_yes, as_json)
+        return
+    if not task:
+        raise click.UsageError("Missing argument 'TASK'.")
 
     worktree_info = None
     if worktree:
@@ -431,6 +771,13 @@ def run(task: str, model: str | None, profile: str | None, assume_yes: bool,
                             interactive=False, assume_yes=assume_yes,
                             model_id=model, profile_id=profile)
         from daemon.agent.runtime import AgentUI
+
+        if ctx.model is not None and ctx.model.provider == "demo" \
+                and not as_json:
+            _echo("demo provider: SCRIPTED demonstration - not a real "
+                  "model, no network, no API key. It reads one named file "
+                  "and proposes a minimal edit through the real "
+                  "permission/checkpoint path.", color="yellow")
 
         if as_json:
             ui = AgentUI()  # silent: --json emits machine-readable output only
@@ -479,6 +826,27 @@ def run(task: str, model: str | None, profile: str | None, assume_yes: bool,
     ctx.close()
 
 
+@main.command()
+@click.argument("task")
+@click.option("--yes", "assume_yes", is_flag=True,
+              help="Assume-yes for permission prompts (CI/scripting)")
+@click.option("--json", "as_json", is_flag=True, help="Structured output")
+@click.option("--worktree", is_flag=True,
+              help="Run in an isolated git worktree on a daemon/<task> branch")
+@_workspace_option
+def demo(task: str, assume_yes: bool, as_json: bool, worktree: bool,
+         workspace: Path | None) -> None:
+    """Run a task against the built-in SCRIPTED demo provider.
+
+    Not a real model: deterministic, offline, no API key. It exercises
+    the real harness (tools, permissions, checkpoints) so a fresh
+    install can prove a full run with zero credentials.
+    """
+    run.callback(task=task, model=None, profile=None,
+                 assume_yes=assume_yes, as_json=as_json, worktree=worktree,
+                 workspace=workspace, provider="demo")
+
+
 @main.command("eval")
 @click.option("--target", multiple=True, required=True,
               help="Run against PROFILE=MODEL_ID; use =MODEL_ID for the active profile")
@@ -509,60 +877,149 @@ def evaluate(target: tuple[str, ...], task_file: Path | None,
         click.echo(rendered)
 
 
+def _plan_edit(plan_id: str, workspace: Path | None) -> None:
+    """`daemon plan --edit <id>`: the recorded edit path.
+
+    Opens the stored plan in the user's editor and records the
+    result as a plan.edited kernel event (review round 2, R1-3).
+    Requires an interactive terminal: editing is a deliberate
+    user act, and a non-interactive caller cannot be the user at
+    an editor — a model run scripting this command with a no-op
+    EDITOR must not be able to re-record a forgery. No
+    credentials are needed (require_auth=False): editing records
+    an event, it never talks to a model.
+    """
+    from .context import build_context
+    from .plans import PlanError, PlanStore, edit_plan_record
+
+    if not os.isatty(0):
+        _fail(PlanError(
+            "plan editing needs an interactive terminal — run "
+            "`daemon plan --edit` at a prompt, with EDITOR or "
+            "VISUAL set to your editor."))
+    config = Config.load(workspace)
+    try:
+        ctx = build_context(workspace=workspace, config=config,
+                            interactive=False, require_auth=False,
+                            select_model=False)
+    except DaemonError as exc:
+        _fail(exc)
+    try:
+        record, changed = edit_plan_record(
+            PlanStore(ctx.workspace), plan_id,
+            run_id=ctx.session.meta.id if ctx.session is not None
+            else None)
+    except DaemonError as exc:
+        _fail(exc)
+    finally:
+        ctx.close()
+    if changed:
+        _echo(f"plan {record.id} edited — new version recorded in the "
+              f"event kernel (hash {record.hash[:12]})", color="green")
+        _echo("Approve and execute it with: "
+              f"daemon run --execute-plan {record.id}")
+    else:
+        _echo(f"plan {record.id} unchanged — it already matches the "
+              f"recorded version", color="green")
+
+
 @main.command()
-@click.argument("goal")
+@click.argument("goal", required=False)
+@click.option("--edit", "edit_id", default=None, metavar="PLAN_ID",
+              help="Edit a stored plan in $EDITOR ($VISUAL first) and "
+                   "record the edit in the event kernel — the recorded "
+                   "edit path. Cannot be combined with GOAL or --execute.")
 @click.option("--execute", is_flag=True, help="Execute the plan after creating it")
 @click.option("--yes", "assume_yes", is_flag=True)
+@click.option("--provider", default=None,
+              help="Credential-less built-in provider: 'demo' (scripted, "
+                   "not a real model) - plans offline with no API key")
 @_workspace_option
-def plan(goal: str, execute: bool, assume_yes: bool, workspace: Path | None) -> None:
+def plan(goal: str | None, execute: bool, assume_yes: bool,
+         workspace: Path | None, provider: str | None = None,
+         edit_id: str | None = None) -> None:
     """Create an implementation plan (and optionally execute it)."""
+    if edit_id is not None:
+        if goal is not None or execute:
+            raise click.UsageError(
+                "--edit cannot be combined with GOAL or --execute.")
+        _plan_edit(edit_id, workspace)
+        return
+    if goal is None:
+        raise click.UsageError(
+            "missing argument 'GOAL' (or use --edit PLAN_ID to edit a "
+            "stored plan).")
     from .context import build_context
+
+    if provider is not None:
+        if provider != "demo":
+            raise click.UsageError(
+                f"--provider only supports 'demo' (the scripted built-in); "
+                f"use --profile for stored credentials, not '{provider}'.")
+        profile = "demo"  # reserved profile id: see context.build_context
+    else:
+        profile = None
 
     config = Config.load(workspace)
     try:
         ctx = build_context(workspace=workspace, config=config,
-                            interactive=False, assume_yes=assume_yes)
+                            interactive=False, assume_yes=assume_yes,
+                            profile_id=profile)
     except DaemonError as exc:
         _fail(exc)
     renderer = _make_renderer(config, plain=not sys.stdout.isatty())
-    from .agent.planner import TaskTracker, parse_plan
-    from .agent.prompts import planner_prompt
-    from .providers.types import ChatRequest, Message
+    from .agent.planner import TaskTracker
+    from .events import emit_plan_approved
+    from .plans import PlanError, PlanStore, draft_plan, run_plan_tasks, verify_approved
 
     tracker = TaskTracker()
+    store = PlanStore(ctx.workspace)
 
     async def _go() -> None:
-        context = ctx.index.summary() if ctx.index else ""
-        request = ChatRequest(
-            model=ctx.model.model_id,
-            messages=[Message.user(planner_prompt(goal, context))],
-            stream=True, max_tokens=2000)
-        text = ""
-        async for event in ctx.adapter.chat(request):
-            if event.kind == "text" and event.text:
-                text += event.text
-                await renderer.text_delta(event.text)
-        await renderer.text_done()
-        parsed = parse_plan(goal, text)
-        tracker.load(parsed)
+        nonlocal tracker
+        record = await draft_plan(ctx, goal, created_by="cli")
+        tracker.load(record.plan)
         renderer.task_list(tracker)
-        if execute:
-            runtime = ctx.build_runtime(ui=renderer,
-                                        extra_context=tracker.context_block)
-            while True:
-                task_obj = tracker.plan.next_task()
-                if task_obj is None:
-                    break
-                tracker.start(task_obj)
-                renderer.rule(f"task {task_obj.id}")
-                result = await runtime.run(
-                    f"Execute task {task_obj.id}: {task_obj.title}\n"
-                    f"{task_obj.description}\n"
-                    + (f"Verification: {task_obj.verification}"
-                       if task_obj.verification else ""))
-                tracker.finish(task_obj, success=True,
-                               result=result.text or "")
-            renderer.task_list(tracker)
+        _echo(f"plan {record.id} saved to {store.path_for(record)} "
+              f"(not executed)", color="green")
+        _echo(f"Edit it with: daemon plan --edit {record.id} "
+              f"(the edit is recorded in the event kernel)")
+        if not execute:
+            return
+        # The broker gate (§2.3): --execute asks on the terminal;
+        # --yes never substitutes, and a non-tty run refuses.
+        approved = ctx.permissions.approve_plan(
+            plan_id=record.id, goal=record.goal,
+            task_count=len(record.tasks),
+            files=[file for task in record.tasks for file in task.files],
+            plan_hash=record.hash, tasks=list(record.tasks),
+            approver=renderer.approve)
+        if not approved:
+            _echo("plan execution not approved — nothing ran.",
+                  color="yellow")
+            return
+        # Kernel-anchored approval (review round 1, R1-3a): the
+        # hash is recorded outside the workspace and the file is
+        # re-read and checked against it before anything executes.
+        seq = emit_plan_approved(ctx.session.meta.id, record.plan,
+                                 via="--execute",
+                                 plan_id=record.id, plan_hash=record.hash)
+        if seq is None:
+            raise PlanError(
+                "plan approval could not be recorded in the event "
+                "kernel — refusing to execute")
+        record = store.load(record.id)
+        verify_approved(record)
+        # Fresh tracker from the verified record: the draft-time
+        # tracker is stale if the file was edited before approval.
+        tracker = TaskTracker()
+        tracker.load(record.plan)
+        runtime = ctx.build_runtime(ui=renderer,
+                                    extra_context=tracker.context_block)
+        done = await run_plan_tasks(runtime, tracker, renderer=renderer)
+        renderer.task_list(tracker)
+        if not done:
+            raise SystemExit(1)
 
     try:
         asyncio.run(_go())
@@ -920,7 +1377,9 @@ def sessions_list() -> None:
         _echo("No saved sessions.")
         return
     for meta in metas:
-        _echo(f"{meta.id:<24} {meta.role:<9} {meta.title[:60]}")
+        marker = " [interrupted]" if meta.display_status == "interrupted" \
+            else ""
+        _echo(f"{meta.id:<24} {meta.role:<9} {meta.title[:60]}{marker}")
 
 
 @sessions.command("show")
@@ -963,6 +1422,115 @@ def sessions_resume(session_id: str) -> None:
                  session_id=session_id, plain=False)
 
 
+@main.command()
+@click.argument("run_id")
+def replay(run_id: str) -> None:
+    """Reconstruct a run from its event log and diff it against the session store.
+
+    Prints the projected state (message counts, checkpoint presence)
+    and either "identical" or a DIVERGENT report naming the first
+    mismatch. Exit 0 identical, 1 divergent, 2 no event record or
+    no such session. Output is deterministic: two invocations print
+    byte-identical text.
+    """
+    from .events import replay_report
+
+    lines, code = replay_report(run_id)
+    for line in lines:
+        _echo(line)
+    raise SystemExit(code)
+
+
+@main.command()
+@click.option("--json", "as_json", is_flag=True,
+              help="Machine-readable output")
+def selftest(as_json: bool) -> None:
+    """Run the release gate: doctor, demo run, offline eval, repomap,
+    memory, worktree, sandbox probe and (with credentials) a real
+    model completion. Verdict PASS / PARTIAL / FAIL; exit 0 / 1 / 2.
+    A leg that cannot run is SKIP, never PASS."""
+    from .selftest import format_report, run_selftest
+
+    report = run_selftest()
+    if as_json:
+        click.echo(json.dumps(report.to_json(), indent=2))
+    else:
+        for line in format_report(report):
+            _echo(line)
+    raise SystemExit(report.exit_code)
+
+
+@main.command()
+@click.argument("checkpoint_id", required=False)
+@click.option("--list", "list_only", is_flag=True,
+              help="List undoable checkpoints (from the event log)")
+@click.option("--yes", "assume_yes", is_flag=True,
+              help="Restore without asking")
+@_workspace_option
+def undo(checkpoint_id: str | None, list_only: bool, assume_yes: bool,
+         workspace: Path | None) -> None:
+    """Revert the last checkpoint, or a specific one.
+
+    Undo resolves through the kernel: the checkpoint.created events
+    are the index (see `daemon undo --list`), and the snapshots on
+    disk are the byte storage. Restoring does not create a new
+    checkpoint, so there is no undo-of-undo — to go further back,
+    run `daemon undo <earlier-id>`.
+    """
+    from .checkpoints import CheckpointManager
+    from .errors import CheckpointError
+
+    root = (workspace or Path.cwd()).resolve()
+    manager = CheckpointManager(root)
+    if list_only:
+        indexed = manager.list_from_events()
+        if not indexed:
+            _echo("No checkpoints recorded in the event log for this "
+                  "workspace yet.")
+            return
+        for item in indexed:
+            files = ", ".join(item["files"][:4])
+            extra = (f" (+{len(item['files']) - 4} more)"
+                     if len(item["files"]) > 4 else "")
+            _echo(f"{item['checkpoint_id']}  {item['reason']}  "
+                  f"{files}{extra}")
+        return
+    try:
+        target = manager.resolve_undo(checkpoint_id)
+    except CheckpointError as exc:
+        _fail(exc)
+    if not assume_yes:
+        if sys.stdin.isatty():
+            if not click.confirm(
+                    f"Restore checkpoint {target}? Files created after "
+                    f"it will be deleted."):
+                _echo("Aborted.", color="yellow")
+                return
+        else:
+            _fail(CheckpointError(
+                "Refusing to restore without --yes in a non-interactive "
+                "run (pass --yes to confirm)."))
+    report = asyncio.run(manager.restore_report(target))
+    _echo(f"Restored checkpoint {target}: {report.restored} file(s) "
+          f"restored"
+          + (f", {report.deleted} created file(s) deleted."
+             if report.deleted else "."), color="green")
+
+
+def _active_env_dir():
+    """The active env's directory, or None (no env active)."""
+    from .config import active_env_dir
+
+    return active_env_dir()
+
+
+def _memory_store(workspace: Path | None):
+    """MemoryStore for the CLI: env-scoped while an env is active."""
+    from .memory import MemoryStore
+
+    return MemoryStore(workspace, env_dir=_active_env_dir())
+
+
 @main.group()
 def memory() -> None:
     """Manage persistent memory."""
@@ -972,9 +1540,8 @@ def memory() -> None:
 @click.option("--workspace", "-w", type=click.Path(file_okay=False,
                                                    path_type=Path), default=None)
 def memory_list(workspace: Path | None) -> None:
-    from .memory import MemoryStore
 
-    store = MemoryStore(workspace)
+    store = _memory_store(workspace)
     entries = store.entries()
     if not entries:
         _echo("Memory is empty.")
@@ -988,9 +1555,8 @@ def memory_list(workspace: Path | None) -> None:
 @click.option("--workspace", "-w", type=click.Path(file_okay=False,
                                                    path_type=Path), default=None)
 def memory_search(query: str, workspace: Path | None) -> None:
-    from .memory import MemoryStore
 
-    store = MemoryStore(workspace)
+    store = _memory_store(workspace)
     for entry in store.search(query):
         _echo(f"[{entry.kind:<8}] {entry.content[:120]}")
 
@@ -1000,9 +1566,8 @@ def memory_search(query: str, workspace: Path | None) -> None:
 @click.option("--workspace", "-w", type=click.Path(file_okay=False,
                                                    path_type=Path), default=None)
 def memory_clear(scope: str, workspace: Path | None) -> None:
-    from .memory import MemoryStore
 
-    count = MemoryStore(workspace).clear(scope)
+    count = _memory_store(workspace).clear(scope)
     _echo(f"Cleared {count} {scope} memory entries", color="green")
 
 
@@ -1021,9 +1586,8 @@ def memory_add_verified(content: str, source: str, source_location: str,
                         confidence: float, tags: tuple[str, ...],
                         workspace: Path | None) -> None:
     """Save a verified project fact (with source and confidence)."""
-    from .memory import MemoryStore
 
-    store = MemoryStore(workspace)
+    store = _memory_store(workspace)
     contradictions = store.find_contradictions(
         content, source_location=source_location)
     entry = store.add_verified(
@@ -1041,9 +1605,8 @@ def memory_add_verified(content: str, source: str, source_location: str,
                                                    path_type=Path), default=None)
 def memory_verified(workspace: Path | None) -> None:
     """List verified facts, highest confidence first."""
-    from .memory import MemoryStore
 
-    facts = MemoryStore(workspace).get_verified_facts(limit=40)
+    facts = _memory_store(workspace).get_verified_facts(limit=40)
     if not facts:
         _echo("No verified facts yet. Add one with "
               "`daemon memory add-verified \"...\" --location file.py:42`.")
@@ -1062,9 +1625,8 @@ def memory_verified(workspace: Path | None) -> None:
 def memory_invalidate(entry_id: str, reason: str,
                       workspace: Path | None) -> None:
     """Mark a memory entry outdated (kept on disk, hidden from the agent)."""
-    from .memory import MemoryStore
 
-    if MemoryStore(workspace).invalidate(entry_id, reason):
+    if _memory_store(workspace).invalidate(entry_id, reason):
         _echo(f"Invalidated {entry_id}: {reason}", color="green")
     else:
         _echo(f"No memory entry {entry_id}.", color="yellow")
@@ -1078,7 +1640,8 @@ def reflex() -> None:
 def _reflex_store(workspace: Path | None):
     from .agent.reflex import ReflexStore
 
-    return ReflexStore(workspace or Path.cwd())
+    return ReflexStore(workspace or Path.cwd(),
+                       env_dir=_active_env_dir())
 
 
 def _reflex_line(entry) -> str:
@@ -1139,6 +1702,114 @@ def reflex_purge(workspace: Path | None) -> None:
     """Delete every reflex entry for the project."""
     count = _reflex_store(workspace).clear()
     _echo(f"Purged {count} reflex entries", color="green")
+
+
+@main.group()
+def env() -> None:
+    """Manage environments: named state bundles (config, memory, reflex).
+
+    An env scopes runs: `daemon env use <name>` activates it, and the
+    config fragment, memory and Reflex state of later runs come from
+    the env until it is reset or deactivated. Credentials and sessions
+    are never part of an env.
+    """
+
+
+@env.command("create")
+@click.argument("name")
+@click.option("--template", type=click.Choice(["developer", "researcher",
+                                               "minimal"]),
+              default="minimal", show_default=True,
+              help="Starting config fragment")
+def env_create(name: str, template: str) -> None:
+    """Create an environment from a template."""
+    from .envs import create_env
+
+    try:
+        info = create_env(name, template=template)
+    except DaemonError as exc:
+        _fail(exc)
+    _echo(f"Environment {info.name} created from template {template}",
+          color="green")
+    _echo(f"  fragment: {info.path / 'config.toml'}")
+    _echo(f"  state:    {info.path / 'state'}")
+    _echo(f"Activate it with: daemon env use {info.name}")
+
+
+@env.command("use")
+@click.argument("name", required=False)
+@click.option("--none", "clear", is_flag=True,
+              help="Deactivate the current environment")
+def env_use(name: str | None, clear: bool) -> None:
+    """Activate an environment (or --none to deactivate)."""
+    from .envs import use_env
+
+    if clear:
+        use_env(None)
+        _echo("No environment active.", color="green")
+        return
+    if name is None:
+        raise click.UsageError("daemon env use <name> (or --none)")
+    try:
+        use_env(name)
+    except DaemonError as exc:
+        _fail(exc)
+    _echo(f"Active environment: {name}", color="green")
+
+
+@env.command("reset")
+@click.argument("name")
+def env_reset(name: str) -> None:
+    """Restore an environment's state to its baseline snapshot."""
+    from .envs import reset_env
+
+    try:
+        restored = reset_env(name)
+    except DaemonError as exc:
+        _fail(exc)
+    _echo(f"Environment {name} reset to its baseline "
+          f"({len(restored)} file(s) restored, hashes verified).",
+          color="green")
+
+
+@env.command("list")
+def env_list() -> None:
+    """List environments, marking the active one."""
+    from .envs import list_envs
+
+    infos = list_envs()
+    if not infos:
+        _echo("No environments yet. Create one with "
+              "`daemon env create <name> --template developer`.")
+        return
+    for info in infos:
+        marker = " *" if info.active else "  "
+        _echo(f"{marker} {info.name:<16} {info.template:<12} "
+              f"{info.created_at}")
+
+
+@env.command("show")
+@click.argument("name", required=False)
+def env_show(name: str | None) -> None:
+    """Show one environment (default: the active one)."""
+    from .envs import show_env
+
+    try:
+        detail = show_env(name)
+    except DaemonError as exc:
+        _fail(exc)
+    _echo(f"environment: {detail['name']}"
+          + (" (active)" if detail["active"] else ""))
+    _echo(f"template:    {detail['template']}")
+    _echo(f"created:     {detail['created_at']}")
+    _echo(f"path:        {detail['path']}")
+    _echo(f"fragment:    {detail['config']}")
+    _echo("baseline (manifest hashes):")
+    for rel, digest in sorted(detail["manifest_files"].items()):
+        _echo(f"  {rel}  {digest[:12]}")
+    _echo("live state files:")
+    for rel in detail["state_files"]:
+        _echo(f"  {rel}")
 
 
 @main.group()

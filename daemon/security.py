@@ -349,13 +349,93 @@ def is_within(path: Path, root: Path) -> bool:
     return _contained(Path(root).resolve(), Path(path).resolve())
 
 
+# Segment-based rules ON TOP of the exact-name list (review round
+# 2, V10; round 3, R2-7): the name is split into segments on
+# underscores and other non-alphanumerics, and a variable is
+# credential-carrying when a segment IS one of these words (trailing
+# digits ignored, so TOKEN2 behaves like TOKEN). Round 2 matched
+# SUBSTRINGS, which leaked in both directions: PASS / PWD / BEARER /
+# COOKIE were missing (DB_PASS, APP_PWD, MY_BEARER and
+# SESSION_COOKIE all reached children), while MONKEY (contains KEY),
+# KEYBOARD_LAYOUT (starts with KEY) and AUTHOR (contains AUTH) were
+# stripped though they carry nothing. PASSWD and OAUTH are retained
+# from round 2's set so pinned behavior (db_passwd, OAUTH_CLIENT)
+# does not regress. Round 4 (R3-2) adds PASSPHRASE and JWT: the
+# segment vocabulary still missed them, so GPG_PASSPHRASE-style
+# variables and bare/APP_JWT reached every child process.
+_SECRET_ENV_SEGMENTS = frozenset({
+    "KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASS", "PWD",
+    "PASSPHRASE", "JWT",
+    "BEARER", "COOKIE", "CREDENTIAL", "CREDENTIALS", "AUTH", "OAUTH",
+    "APIKEY", "PRIVATE"})
+
+# Fused credential names (round 4, R3-2): a name that is ONE segment
+# gluing two credential words together - SECRETKEY is the fused
+# twin of SECRET_KEY. These match the FULL name only, never a
+# segment or prefix, so innocent lookalikes (MONKEY,
+# KEYBOARD_LAYOUT) still survive: neither is a full-name match.
+_SECRET_ENV_FUSED = frozenset({"SECRETKEY", "PRIVATEKEY", "ACCESSKEY"})
+
+# Fused-form closure (round 5, R4-2): the round-4 fused set still
+# enumerated spellings, and fused near-misses slipped both rules -
+# JWTSECRET (the fused twin of JWT_SECRET), SECRETKEY2 (the fused
+# check never normalized trailing digits, though the segment path
+# did), and APPSECRET (fused APP + SECRET; APP_SECRET strips). The
+# name is now normalized by stripping trailing digits FIRST, and
+# the normalized name also strips when it STARTS with JWT or ENDS
+# with one of these credential words. The pinned survivors are
+# unaffected: MONKEY and KEYBOARD_LAYOUT match none of these,
+# SECRETKEYS ends in KEYS (not a listed word), MY_SECRETKEY ends
+# in KEY, and the preserve list still beats every rule.
+_SECRET_ENV_FUSED_SUFFIXES = ("SECRET", "PASSPHRASE", "TOKEN",
+                              "PASSWORD")
+
+# Known NON-secret names that survive stripping even though a
+# segment matches above (R2-7): the preserve list beats every strip
+# rule. SSH_AUTH_SOCK is a socket PATH - the ssh-agent endpoint, not
+# a secret - and stripping it silently broke git-over-SSH in the
+# shell tool; the GIT_AUTHOR_* / GIT_COMMITTER_* identity variables
+# are commit-attribution plumbing, and stripping them silently
+# changed who commits were attributed to.
+_PRESERVED_ENV_VARS = frozenset({
+    "SSH_AUTH_SOCK",
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"})
+
+_SEGMENT_SPLIT = re.compile(r"[^A-Z0-9]+")
+
+
+def _is_secret_env_name(name: str) -> bool:
+    if name in _PRESERVED_ENV_VARS:
+        return False
+    if name in KNOWN_SECRET_ENV_VARS:
+        return True
+    normalized = name.upper().rstrip("0123456789")
+    if normalized in _SECRET_ENV_FUSED:
+        return True
+    if normalized.startswith("JWT"):
+        return True
+    if normalized.endswith(_SECRET_ENV_FUSED_SUFFIXES):
+        return True
+    return any(
+        segment.rstrip("0123456789") in _SECRET_ENV_SEGMENTS
+        for segment in _SEGMENT_SPLIT.split(name.upper())
+        if segment)
+
+
 def strip_secret_env(env: dict[str, str] | None) -> dict[str, str]:
-    """Drop credential-carrying variables from a child environment."""
+    """Drop credential-carrying variables from a child environment.
+
+    Exact known names plus the segment rules above, minus the
+    preserve list; this is the single strip implementation, so every
+    child-process path that uses it (shell tool, test runner,
+    formatters, verification, sandboxed or not) strips the same set.
+    """
     if env is None:
         import os
 
         env = dict(os.environ)
-    return {k: v for k, v in env.items() if k not in KNOWN_SECRET_ENV_VARS}
+    return {k: v for k, v in env.items() if not _is_secret_env_name(k)}
 
 
 def first(iterable: Iterable[str]) -> str | None:

@@ -48,6 +48,12 @@ class DaemonContext:
     index: ProjectIndex | None = None
     mcp: McpManager | None = None
     interactive: bool = True
+    # Active environment (§2.4), resolved in build_context: the name,
+    # and its directory under ~/.daemon/envs/<name>/ (None when no env
+    # is active). Memory + Reflex state scope to it; the config
+    # fragment already layered in Config.load.
+    env_name: str | None = None
+    env_dir: Path | None = None
     _mcp_clients: list = field(default_factory=list)
 
     # ------------------------------------------------------------ factories
@@ -68,6 +74,7 @@ class DaemonContext:
             index=self.index,
             role=role,
             extra_context=extra_context,
+            env_dir=self.env_dir,
         )
 
     def adapter_for_provider(self, provider_id: str):
@@ -98,6 +105,10 @@ class DaemonContext:
                 pass
         if self.auth is not None:
             self.auth.close()
+        if self.session is not None:
+            # Release the resume lock (V5) so a later context in the
+            # same process (tests, embedded use) can resume it.
+            self.session.release_lock()
 
 
 def build_context(
@@ -124,12 +135,18 @@ def build_context(
 
     ctx = DaemonContext(config=config, workspace=workspace, home=home,
                         renderer=renderer, interactive=interactive)
+    # Active environment (§2.4): resolved once here; the fragment
+    # already layered in Config.load, and memory/reflex scope to it.
+    from .config import active_env_dir, active_env_name
+
+    ctx.env_name = active_env_name(home)
+    ctx.env_dir = active_env_dir(home)
     ctx.index = ProjectIndex(workspace, config=config)
     try:
         ctx.index.build()
     except OSError as exc:
         _logger.warning("project index failed: %s", exc)
-    ctx.memory = MemoryStore(workspace, home=home)
+    ctx.memory = MemoryStore(workspace, home=home, env_dir=ctx.env_dir)
     ctx.checkpoints = CheckpointManager(workspace)
     ctx.mcp = McpManager(config, workspace)
 
@@ -143,7 +160,23 @@ def build_context(
         _logger.warning("auth unavailable: %s", exc)
     ctx.auth = auth
 
-    if auth is not None:
+    if profile_id == "demo":
+        # Built-in scripted demo provider (reserved profile id "demo"):
+        # no credentials, no stored profile, no network. Selected via
+        # `daemon demo`, `daemon run --provider demo`, or the eval target
+        # `demo=demo-scripted`. Never touches the user's real profiles.
+        descriptor = provider_by_id("demo")
+        if descriptor is None:  # pragma: no cover - catalog row is static
+            raise DaemonError("Demo provider missing from the catalog.")
+        ctx.adapter = AdapterRegistry().create(descriptor, config=config)
+        try:
+            ctx.models = asyncio.run(ctx.adapter.list_models())
+        finally:
+            asyncio.run(ctx.adapter.close())  # clients bind to loops
+        if select_model:
+            ctx.model = (_select_model(ctx.models, model_id, role, config)
+                         if model_id else ctx.models[0])
+    elif auth is not None:
         profile = auth.store.get(profile_id) if profile_id else auth.store.active()
         if profile_id and profile is None:
             raise AuthError(
@@ -188,23 +221,35 @@ def build_context(
                         ", ".join(f"{name} ({reason})"
                                   for name, reason in plugin_result.failed))
     rules = config.get("permissions.rules") or []
+    ttl_raw = config.get("permissions.session_grant_ttl_minutes")
+    try:
+        grant_ttl = float(ttl_raw) if ttl_raw is not None else None
+    except (TypeError, ValueError):
+        grant_ttl = None
     ctx.permissions = PermissionEngine(
         workspace, rules=rules,
         approver=(renderer.approve if renderer is not None and interactive
                   else None),
         assume_yes=assume_yes or bool(config.get("permissions.assume_yes")
                                       and not interactive),
+        session_grant_ttl_minutes=grant_ttl,
     )
 
     # ---- session ---------------------------------------------------------------
     if session_id:
-        ctx.session = Session.load(session_id)
+        # Resuming takes the session's exclusive lock (V5): a second
+        # concurrent resume fails loudly instead of interleaving
+        # transcript appends with this one.
+        ctx.session = Session.load(session_id, lock=True)
     else:
         ctx.session = Session(meta=SessionMeta(
             workspace=str(workspace),
             provider=(ctx.model.provider if ctx.model else ""),
             model=(ctx.model.model_id if ctx.model else ""),
-            role=role))
+            role=role, env=(ctx.env_name or "")))
+    from .log import audit_status
+
+    ctx.session.meta.audit_ok = audit_status()[0]
     return ctx
 
 

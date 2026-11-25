@@ -26,6 +26,33 @@ _LOGGER_NAME = "daemon"
 _AUDIT_NAME = "daemon.audit"
 _configured = False
 _configured_home: Path | None = None
+# None = setup_logging has not run yet in this process. Round 1
+# initialised this to True, so audit_status() claimed OK before any
+# setup while audit() was dropping everything (review round 2, V9).
+_audit_ok: bool | None = None
+_audit_error: str | None = None
+
+
+def audit_status() -> tuple[bool, str | None]:
+    """Whether the audit log is actually recording, and if not, why.
+
+    The audit trail must never fail silently (v0.5.0 §3): setup
+    records a failed audit-handler open here, and doctor / session
+    meta surface it instead of decisions vanishing unrecorded.
+    Before setup_logging has run at all, the honest report is
+    not-ok: nothing is being recorded in that state.
+    """
+    if _audit_ok is None:
+        return False, "audit logging not initialised " \
+                      "(setup_logging has not run)"
+    return _audit_ok, _audit_error
+
+
+def mark_audit_unavailable(reason: str) -> None:
+    """Record that audit logging could not be initialised at all."""
+    global _audit_ok, _audit_error
+    _audit_ok = False
+    _audit_error = reason
 
 
 class RedactingFilter(logging.Filter):
@@ -56,7 +83,7 @@ class RedactingFilter(logging.Filter):
 
 def setup_logging(home: Path, *, level: int | None = None, audit: bool = True) -> None:
     """Initialise the rotating debug log and the audit log. Idempotent."""
-    global _configured, _configured_home
+    global _configured, _configured_home, _audit_ok, _audit_error
     home = Path(home)
     if _configured and _configured_home == home:
         return
@@ -85,16 +112,32 @@ def setup_logging(home: Path, *, level: int | None = None, audit: bool = True) -
     root.propagate = False
 
     if audit:
+        _audit_ok = True
+        _audit_error = None
         audit_logger = logging.getLogger(_AUDIT_NAME)
         audit_logger.setLevel(logging.INFO)
-        audit_handler = logging.handlers.RotatingFileHandler(
-            log_dir / "audit.log", maxBytes=2 * 1024 * 1024, backupCount=3,
-            encoding="utf-8",
-        )
-        audit_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
-        audit_handler.addFilter(RedactingFilter())
-        audit_logger.addHandler(audit_handler)
+        try:
+            audit_handler = logging.handlers.RotatingFileHandler(
+                log_dir / "audit.log", maxBytes=2 * 1024 * 1024,
+                backupCount=3, encoding="utf-8",
+            )
+        except OSError as exc:
+            # The broker's record must not vanish silently: remember
+            # the failure where doctor and session meta can see it,
+            # and say so in the debug log.
+            _audit_ok = False
+            _audit_error = f"{type(exc).__name__}: {exc}"
+            root.warning("audit log unavailable (%s); permission "
+                         "decisions will NOT be recorded", _audit_error)
+        else:
+            audit_handler.setFormatter(logging.Formatter(
+                "%(asctime)s %(message)s"))
+            audit_handler.addFilter(RedactingFilter())
+            audit_logger.addHandler(audit_handler)
         audit_logger.propagate = False
+    else:
+        _audit_ok = False
+        _audit_error = "audit logging disabled by setup_logging(audit=False)"
 
     # Silence noisy third-party loggers unless explicitly debugging.
     for noisy in ("httpx", "httpcore", "keyring", "asyncio"):
@@ -113,7 +156,13 @@ def get_logger(name: str = _LOGGER_NAME) -> logging.Logger:
 
 
 def audit(event: str, **details: object) -> None:
-    """Append a security-relevant event to the audit log (best effort)."""
+    """Append a security-relevant event to the audit log (best effort).
+
+    A no-op only when logging was never set up (library use, unit
+    tests). Real runs initialise logging at the CLI entry, and a
+    failed audit-log open is recorded in :func:`audit_status` and
+    surfaced by doctor and session meta - never silently lost.
+    """
     logger = logging.getLogger(_AUDIT_NAME)
     if not logger.handlers:  # audit before setup_logging (tests, library use)
         return

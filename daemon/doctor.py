@@ -50,10 +50,13 @@ def run_doctor(config: Config, workspace: Path, *,
     _check_python(report)
     _check_terminal(report)
     _check_home(report, fix)
+    _check_audit_log(report)
     _check_dependencies(report)
     _check_vault(report)
     _check_profiles(report)
+    _check_demo_provider(report)
     _check_models(report)
+    _check_sandbox(report, config)
     _check_git(report)
     _check_shell(report)
     _check_devtools(report)
@@ -99,6 +102,31 @@ def _check_home(report: Report, fix: bool) -> Path:
                    f"{home} is not writable: {exc}"
                    + ("; set DAEMON_HOME to a writable path" if not fix else ""))
     return home
+
+
+def _check_audit_log(report: Report) -> None:
+    # The broker's audit trail must never fail silently (v0.5.0 §3):
+    # if the audit log cannot be opened, doctor FAILS loudly here
+    # instead of runs quietly losing every permission decision.
+    from .log import audit_status
+
+    log_path = daemon_home() / "logs" / "audit.log"
+    ok, error = audit_status()
+    if not ok:
+        report.add(_FAIL, "audit log",
+                   f"not recording: {error} - permission decisions "
+                   f"are NOT being written to {log_path}")
+        return
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8"):
+            pass
+    except OSError as exc:
+        report.add(_FAIL, "audit log",
+                   f"cannot open {log_path}: {exc} - permission "
+                   "decisions would NOT be recorded")
+        return
+    report.add(_OK, "audit log", str(log_path))
 
 
 def _check_dependencies(report: Report) -> None:
@@ -176,6 +204,50 @@ def _check_profiles(report: Report) -> None:
         auth.close()
     except DaemonError as exc:
         report.add(_WARN, "profiles", f"credential store issue: {exc}")
+
+
+def _check_demo_provider(report: Report) -> None:
+    # The demo provider is scripted, not a model - doctor says so plainly
+    # so its availability is never mistaken for a configured provider.
+    report.add(_INFO, "demo provider",
+               "built-in SCRIPTED demo available offline ('daemon demo') "
+               "- not a real model, no API key, no network")
+
+
+def _check_sandbox(report: Report, config: Config) -> None:
+    # Shell sandbox status, reported either way (v0.5.0 §5) - and
+    # never faked: an enabled-but-unavailable sandbox is a warning
+    # that commands run unsandboxed, not a green tick.
+    from .sandbox import sandbox_status
+    from .sandbox_backends import select_backend
+
+    status = sandbox_status(config)
+    if status.level == "off":
+        report.add(_INFO, "shell sandbox",
+                   "off (opt-in: sandbox.shell=true, Linux/bubblewrap)")
+    elif status.level == "full":
+        report.add(_OK, "shell sandbox",
+                   "enabled - bubblewrap filesystem + network "
+                   "namespace isolation (probed working)")
+    elif status.level == "filesystem":
+        report.add(_WARN, "shell sandbox",
+                   f"enabled - filesystem isolation ONLY: "
+                   f"{status.reason}")
+    else:
+        report.add(_WARN, "shell sandbox",
+                   f"enabled but UNAVAILABLE: {status.reason} - shell "
+                   "commands run UNSANDBOXED")
+    # The §2.6 backend selection (what the selftest probe uses):
+    # container when available -> bwrap -> none.
+    backend = select_backend(config)
+    if backend is None:
+        report.add(_INFO, "sandbox backend",
+                   "none available on this host (selftest sandbox "
+                   "leg will SKIP)")
+    else:
+        _ok, detail = backend.probe()
+        report.add(_INFO, "sandbox backend",
+                   f"{backend.name} selected - {detail}")
 
 
 def _check_models(report: Report) -> None:

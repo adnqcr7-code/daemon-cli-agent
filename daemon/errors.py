@@ -94,6 +94,10 @@ class CheckpointError(DaemonError):
     """Checkpoint creation or restore failed."""
 
 
+class SandboxError(DaemonError):
+    """The sandbox backend refused or failed."""
+
+
 class UsageLimitExceeded(DaemonError):
     """A configured token / cost ceiling was hit. Never silent."""
 

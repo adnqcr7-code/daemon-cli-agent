@@ -13,9 +13,11 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .config import project_dir
 from .errors import CheckpointError
+from .events import emit as emit_event
 from .log import audit, get_logger
 from .security import is_within
 from .tools.patches import unified_diff_text
@@ -48,10 +50,16 @@ class RestoreReport:
 
 
 class CheckpointManager:
-    def __init__(self, workspace: Path, *, keep: int = _KEEP) -> None:
+    def __init__(self, workspace: Path, *, keep: int = _KEEP,
+                 run_id: str | None = None) -> None:
         self.workspace = Path(workspace).resolve()
         self.root = project_dir(self.workspace) / "checkpoints"
         self.keep = keep
+        # Event-kernel run id (v0.9.0 Phase 1): the session id of the
+        # run creating checkpoints. None outside a run - then
+        # creation is audit-logged only, as before. Set by the
+        # runtime at run() start.
+        self.run_id = run_id
 
     def _dir(self, checkpoint_id: str) -> Path:
         return self.root / checkpoint_id
@@ -96,6 +104,13 @@ class CheckpointManager:
             raise CheckpointError("Nothing to checkpoint (no existing files).")
         self._prune()
         audit("checkpoint-created", id=checkpoint_id, files=len(saved))
+        emit_event(self.run_id, "checkpoint.created", {
+            "checkpoint_id": checkpoint_id, "files": saved,
+            "created_files": created_rels, "reason": reason,
+            # The workspace, so `daemon undo` can index checkpoint
+            # events per workspace (§2.5) — the kernel is the index,
+            # the snapshots on disk are the byte storage.
+            "workspace": str(self.workspace)})
         _logger.debug("checkpoint %s: %d files", checkpoint_id, len(saved))
         return Checkpoint(id=checkpoint_id, created=time.time(),
                           files=saved, reason=reason,
@@ -129,6 +144,63 @@ class CheckpointManager:
     def latest(self) -> Checkpoint | None:
         checkpoints = self.list()
         return checkpoints[0] if checkpoints else None
+
+    def list_from_events(self) -> list[dict[str, Any]]:
+        """Undoable checkpoints for this workspace, newest first —
+        indexed by the kernel's checkpoint.created events (§2.5).
+
+        The events are the index; the snapshots on disk are the byte
+        storage. Events recorded before the workspace field existed
+        (pre-§2.5) carry no workspace and are not listed.
+        """
+        from .events import EventStore
+
+        workspace = str(self.workspace)
+        indexed: list[dict[str, Any]] = []
+        for event in EventStore().read_by_type("checkpoint.created"):
+            payload = event.payload
+            if payload.get("workspace") != workspace:
+                continue
+            indexed.append({
+                "checkpoint_id": payload.get("checkpoint_id", ""),
+                "files": list(payload.get("files") or []),
+                "created_files": list(payload.get("created_files") or []),
+                "reason": str(payload.get("reason", "")),
+                "created_at": event.created_at,
+                "event_id": event.id,
+                "run_id": event.run_id,
+            })
+        indexed.sort(key=lambda item: (item["created_at"], item["event_id"]),
+                     reverse=True)
+        return indexed
+
+    def resolve_undo(self, checkpoint_id: str | None) -> str:
+        """Resolve an undo target through the event index: None means
+        the latest checkpoint; an id must have a checkpoint.created
+        event for this workspace, and its snapshot must still exist
+        on disk. A snapshot without an event is not undoable through
+        this path — the kernel is the index."""
+        indexed = self.list_from_events()
+        if checkpoint_id is None:
+            if not indexed:
+                raise CheckpointError(
+                    "No checkpoints recorded in the event log for this "
+                    "workspace yet (checkpoints appear here once a run "
+                    "creates them).")
+            target = indexed[0]["checkpoint_id"]
+        else:
+            if checkpoint_id not in {item["checkpoint_id"]
+                                     for item in indexed}:
+                raise CheckpointError(
+                    f"No checkpoint '{checkpoint_id}' in the event log "
+                    f"for this workspace (see `daemon undo --list`).")
+            target = checkpoint_id
+        if not self._dir(target).exists():
+            raise CheckpointError(
+                f"Checkpoint '{target}' is in the event log but its "
+                f"snapshot is gone from disk (pruned) — it cannot be "
+                f"restored.")
+        return target
 
     def _resolve(self, checkpoint_id: str) -> Path:
         if checkpoint_id == "latest":

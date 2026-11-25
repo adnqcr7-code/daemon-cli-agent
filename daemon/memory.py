@@ -8,6 +8,7 @@ data records with a source field.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -89,9 +90,27 @@ class MemoryStore:
     """Two persistent layers: user-level and project-level memory."""
 
     def __init__(self, workspace: Path | None = None,
-                 home: Path | None = None) -> None:
+                 home: Path | None = None,
+                 env_dir: Path | None = None) -> None:
         self.home = Path(home) if home else daemon_home()
         self.workspace = Path(workspace) if workspace else None
+        if env_dir is not None:
+            # Env-scoped (§2.4): both layers live under the env's
+            # state dir, so env A's memory is invisible in env B.
+            # The project layer is namespaced by workspace (a stable
+            # hash of the resolved path) so one env can serve many
+            # workspaces without mixing them.
+            env_root = Path(env_dir) / "state"
+            self.user_path = env_root / "memory.jsonl"
+            if self.workspace is not None:
+                slug = hashlib.sha256(
+                    str(self.workspace.resolve()).encode("utf-8")
+                ).hexdigest()[:12]
+                self.project_path = (env_root / "workspaces" / slug
+                                     / "memory.jsonl")
+            else:
+                self.project_path = None
+            return
         self.user_path = self.home / "memory.jsonl"
         self.project_path = (project_dir(self.workspace) / "memory.jsonl"
                              if self.workspace else None)

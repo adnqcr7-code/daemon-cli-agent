@@ -1,6 +1,8 @@
-"""Layered configuration: defaults <- user file <- project file <- environment.
+"""Layered configuration: defaults <- user file <- env fragment <-
+project file <- environment.
 
 * User config    ``~/.daemon/config.toml`` (or ``$DAEMON_HOME``)
+* Env fragment   ``~/.daemon/envs/<name>/config.toml`` (active env only)
 * Project config ``<workspace>/.daemon/config.toml``
 * Environment    ``DAEMON_<SECTION>_<KEY>`` overrides for selected keys.
 
@@ -21,6 +23,9 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigError
+from .log import get_logger
+
+_logger = get_logger("config")
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -39,6 +44,55 @@ def project_dir(workspace: Path | str) -> Path:
     return Path(workspace) / ".daemon"
 
 
+# ---------------------------------------------------------------------------
+# Environments (v0.9.0 §2.4): the active env is a single file under the
+# home dir, so `daemon env use` takes effect on the next Config.load
+# with no process state. These helpers live here (not in envs.py) so
+# the config loader can use them without an import cycle: envs.py
+# imports this module, never the reverse.
+# ---------------------------------------------------------------------------
+
+ACTIVE_ENV_FILE = "active_env"
+
+
+def envs_root(home: Path | str | None = None) -> Path:
+    return (Path(home) if home is not None else daemon_home()) / "envs"
+
+
+def active_env_name(home: Path | str | None = None) -> str | None:
+    """Name of the active environment, or None when no env is active."""
+    path = (Path(home) if home is not None else daemon_home()) \
+        / ACTIVE_ENV_FILE
+    try:
+        name = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return name or None
+
+
+def active_env_dir(home: Path | str | None = None) -> Path | None:
+    """Directory of the active environment, or None."""
+    name = active_env_name(home)
+    if name is None:
+        return None
+    return envs_root(home) / name
+
+
+def set_active_env(name: str | None,
+                   home: Path | str | None = None) -> None:
+    """Persist (or clear, with None) the active environment."""
+    home_path = Path(home) if home is not None else daemon_home()
+    path = home_path / ACTIVE_ENV_FILE
+    if name is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    home_path.mkdir(parents=True, exist_ok=True)
+    path.write_text(name + "\n", encoding="utf-8")
+
+
 DEFAULTS: dict[str, Any] = {
     "default_provider": None,
     "default_model": None,
@@ -52,6 +106,11 @@ DEFAULTS: dict[str, Any] = {
         "theme": "obsidian",
         "unicode": True,
         "spinner": True,
+        # Diff display budget (§2.5): the permission ASK preview and
+        # the post-edit display are truncated past this, with a
+        # "… N more lines" marker. Tokens are ~4 chars each.
+        "diff_max_lines": 200,
+        "diff_max_tokens": 8000,
     },
     "limits": {
         "warn_cost_usd": 1.0,
@@ -67,6 +126,21 @@ DEFAULTS: dict[str, Any] = {
         "rules": [],
         # Only honoured when the user passes --assume-yes explicitly.
         "assume_yes": False,
+    },
+    "sandbox": {
+        # v0.5.0 §5: run shell commands inside bubblewrap (Linux).
+        # OFF by default - opt-in until it has survived real use.
+        # When on but unavailable (no bwrap, probe fails, non-Linux),
+        # commands run unsandboxed with a loud one-time warning and
+        # doctor reports the gap; availability is probed, never faked.
+        "shell": False,
+        # v0.9.0 §2.6: image for the container backend. Only used
+        # when a container CLI is present and the image exists
+        # locally - the backend never pulls: a missing image means
+        # the backend is unavailable and selection falls through to
+        # bwrap. Set this to an image you have (e.g. a local build)
+        # to use the container backend.
+        "container_image": "docker.io/library/alpine:latest",
     },
     "verification": {
         # After an agent turn that changed files, verify before reporting
@@ -175,6 +249,27 @@ def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]
     return result
 
 
+def _tag_env_rules(layer: dict[str, Any]) -> None:
+    """Mark an env fragment's rules with origin "env" (in place).
+
+    The broker treats origin "env" as unable to relax the classifier
+    floor (review round 1, R1-4): without the tag, env rules arrived
+    as origin "user" and a path ALLOW could widen the
+    outside-workspace ASK floor to ALLOW. The tag overwrites any
+    origin the fragment declares, so a fragment cannot smuggle a
+    user-origin rule past the broker.
+    """
+    permissions = layer.get("permissions")
+    if not isinstance(permissions, dict):
+        return
+    rules = permissions.get("rules")
+    if not isinstance(rules, list):
+        return
+    for raw in rules:
+        if isinstance(raw, dict):
+            raw["origin"] = "env"
+
+
 def _set_path(target: dict[str, Any], dotted: str, value: Any) -> None:
     parts = dotted.split(".")
     node = target
@@ -205,9 +300,45 @@ class Config:
                 project_path = candidate
 
         data = copy.deepcopy(DEFAULTS)
-        for path in (user_path, project_path):
+        # Env fragment layer (§2.4): between the user file and the
+        # project file — the env scopes the run, the project is the
+        # most local and wins. A dangling active-env pointer (env
+        # directory deleted by hand) warns and continues without the
+        # fragment rather than breaking every command.
+        env_path = None
+        env_name = active_env_name(home)
+        if env_name is not None:
+            candidate = envs_root(home) / env_name / "config.toml"
+            if candidate.exists():
+                env_path = candidate
+            else:
+                _logger.warning(
+                    "active environment %r has no config.toml; "
+                    "continuing without it", env_name)
+        for path, is_env in ((user_path, False), (env_path, True),
+                             (project_path, False)):
             if path is not None and path.exists():
-                data = _deep_merge(data, _read_toml(path))
+                layer = _read_toml(path)
+                if is_env:
+                    # Re-validate on every load (review round 1,
+                    # R1-4): a fragment hand-edited after `env use`
+                    # bypassed the create/use-time screen. An invalid
+                    # fragment is skipped, with a warning — the env's
+                    # rules never apply, so the mistake fails closed
+                    # instead of widening the floor mid-run. The
+                    # lazy import avoids a config <-> envs cycle
+                    # (envs imports this module at its top level).
+                    from .envs import EnvError, validate_fragment
+
+                    try:
+                        validate_fragment(layer)
+                    except EnvError as exc:
+                        _logger.warning(
+                            "active environment %r fragment is invalid "
+                            "(%s); continuing without it", env_name, exc)
+                        continue
+                    _tag_env_rules(layer)
+                data = _deep_merge(data, layer)
         for env_name, dotted in _ENV_OVERRIDES.items():
             raw = os.environ.get(env_name)
             if raw is None or raw == "":
