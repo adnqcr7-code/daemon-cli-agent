@@ -34,10 +34,17 @@ _GLYPHS = {
 
 class Renderer(AgentUI):
     def __init__(self, theme: Theme, *, stream: IO | None = None,
-                 plain: bool = False, show_tool_output: bool = True) -> None:
+                 plain: bool = False, show_tool_output: bool = True,
+                 diff_max_lines: int = 200,
+                 diff_max_tokens: int = 8000) -> None:
         self.theme = theme
         self.plain = plain
         self.show_tool_output = show_tool_output
+        # Diff display budget (§2.5): the post-edit display is
+        # truncated past this, with a marker (same budget as the ASK
+        # preview, so the prompt shows what the edit will report).
+        self.diff_max_lines = diff_max_lines
+        self.diff_max_tokens = diff_max_tokens
         self.console = Console(
             file=stream or sys.stdout,
             no_color=plain or bool(os.environ.get("NO_COLOR")),
@@ -113,6 +120,15 @@ class Renderer(AgentUI):
                       f"{output.content.splitlines()[0] if output.content else ''}")
         else:
             self.line("tool_ok", f"{self._g('done')} {name} ok")
+        # Consume ToolOutput.display (§2.5): the diff the edit
+        # reported, truncated to the same budget as the ASK preview.
+        if (not output.is_error and output.display
+                and self.show_tool_output):
+            from ..diffs import truncate_diff
+
+            self.render_diff(truncate_diff(
+                output.display, max_lines=self.diff_max_lines,
+                max_tokens=self.diff_max_tokens))
 
     async def tool_line(self, tool: str, line: str) -> None:
         if self.show_tool_output and line.strip():
@@ -145,6 +161,11 @@ class Renderer(AgentUI):
         body_lines = [f"action      {decision.summary}"]
         if decision.files:
             body_lines.append("files       " + ", ".join(decision.files[:8]))
+        if decision.details:
+            # The plan-execution gate (review round 1, R1-3): the
+            # user approves the task list they see, not a goal line.
+            body_lines.append("tasks       (approving exactly these tasks)")
+            body_lines.extend(f"  {line}" for line in decision.details)
         if decision.reasons:
             body_lines.append("why         " + "; ".join(decision.reasons[:4]))
         body_lines.append(
@@ -154,6 +175,13 @@ class Renderer(AgentUI):
             body_lines.append("DANGER      this action is destructive")
         self.console.print(Panel("\n".join(body_lines), title=header,
                                  border_style=self.theme.style("warn")))
+        # The diff preview (§2.5): the actual unified diff the edit
+        # would produce, computed without mutating anything. Shown
+        # under the panel, before the prompt, so the decision is made
+        # on the change itself — not on a description of it.
+        if decision.diff_preview:
+            self.line("muted", "proposed change:")
+            self.render_diff(decision.diff_preview)
         try:
             answer = self.console.input(
                 f"[{self.theme.style('prompt')}]allow? "

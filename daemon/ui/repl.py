@@ -11,13 +11,12 @@ from __future__ import annotations
 import asyncio
 
 from ..agent.orchestration import Orchestrator, SubagentSpec
-from ..agent.planner import TaskTracker, parse_plan
-from ..agent.prompts import planner_prompt, subagent_roles
+from ..agent.planner import TaskTracker
+from ..agent.prompts import subagent_roles
 from ..agent.session import Session, SessionMeta
 from ..context import DaemonContext, attach_mcp_tools, skill_loader
 from ..errors import DaemonError
 from ..log import describe_exception, get_logger
-from ..providers.types import ChatRequest, Message
 from ..research import ResearchAgent
 from ..tools.git import git as git_run
 from .render import Renderer
@@ -35,6 +34,7 @@ SLASH_COMMANDS = {
     "/tools": "list registered tools",
     "/permissions": "show effective permission rules",
     "/plan": "create an implementation plan: /plan <goal>",
+    "/edit-plan": "edit the active plan in $EDITOR and record the edit: /edit-plan [id]",
     "/build": "execute plan tasks (or run a message)",
     "/design": "build from a BITON design reference: /design <slug or url>",
     "/review": "spawn the reviewer subagent on the current diff",
@@ -60,13 +60,22 @@ SLASH_COMMANDS = {
 
 class Repl:
     def __init__(self, ctx: DaemonContext, renderer: Renderer,
-                 initial_prompt: str | None = None) -> None:
+                 initial_prompt: str | None = None, *,
+                 demo_mode: bool = False) -> None:
         self.ctx = ctx
         self.renderer = renderer
         self.tracker = TaskTracker()
         self.skills = skill_loader(ctx)
         self._attached_skills: list = []
         self.initial_prompt = initial_prompt
+        # demo_mode: no credentials were configured, so the context runs
+        # the scripted demo provider. The REPL offers the labeled demo
+        # up front, once, as a per-run choice (never persisted).
+        self.demo_mode = demo_mode
+        # The stored plan /plan created (its id under .daemon/plans/):
+        # /build executes exactly this record, re-hashed, after the
+        # broker gate. None until /plan runs.
+        self._active_plan_id: str | None = None
         self._loop = asyncio.new_event_loop()
         self.runtime = ctx.build_runtime(ui=renderer,
                                          extra_context=self._context_chain)
@@ -78,6 +87,8 @@ class Repl:
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._startup())
+            if self.demo_mode:
+                self._offer_demo()
             if self.initial_prompt:
                 prompt, self.initial_prompt = self.initial_prompt, None
                 self._turn(prompt)
@@ -171,6 +182,27 @@ class Repl:
             return self._prompt.prompt("› ")
         return input("› ")
 
+    def _offer_demo(self) -> None:
+        """The front-door demo offer (demo mode only, once per run).
+
+        Labeled as scripted, per-run, never persisted as a profile:
+        accepting runs the scripted demo task through the real
+        runtime; declining leaves a working REPL on the demo provider
+        (which answers text but makes no model claims).
+        """
+        self.renderer.line(
+            "warn", "demo mode — no credentials configured")
+        self.renderer.line(
+            "muted", "This is the scripted demo provider, not a real "
+                     "model: no API key, no network, nothing leaves "
+                     "this machine.")
+        self.renderer.line(
+            "muted", "Try the demo? It adds a docstring to a.py in "
+                     "this workspace through the real permission and "
+                     "checkpoint path. (Per-run choice — never saved.)")
+        if ask_demo_offer():
+            self._turn("add a docstring to a.py")
+
     # ------------------------------------------------------------- agent turn
 
     def _turn(self, text: str) -> None:
@@ -225,11 +257,23 @@ class Repl:
 
     # ----------------------------------------------------------------- slash
 
+    def _handler_for(self, command: str):
+        """Resolve a slash command to its handler method.
+
+        Command names are hyphenated (``/edit-plan``) while the
+        methods are underscored (``_cmd_edit_plan``); the hyphen
+        must be normalized here, in the one place that does the
+        lookup, or a hyphenated command is silently unreachable
+        (review round 3, R1-3d).
+        """
+        name = command.lstrip("/").replace("-", "_")
+        return getattr(self, f"_cmd_{name}", None)
+
     def _dispatch(self, line: str) -> bool:
         parts = line.split(None, 1)
         command = parts[0].lower()
         rest = (parts[1] if len(parts) > 1 else "").strip()
-        handler = getattr(self, f"_cmd_{command.lstrip('/')}", None)
+        handler = self._handler_for(command)
         if handler is None:
             self.renderer.line("error", f"unknown command {command} (/help)")
             return False
@@ -332,30 +376,68 @@ class Repl:
         return False
 
     async def _do_plan(self, goal: str) -> None:
-        context = self.ctx.index.summary() if self.ctx.index else ""
-        request = ChatRequest(
-            model=self.ctx.model.model_id,
-            messages=[Message.user(planner_prompt(goal, context))],
-            stream=True, max_tokens=2000)
-        text = ""
-        async for event in self.ctx.adapter.chat(request):
-            if event.kind == "text" and event.text:
-                await self.renderer.text_delta(event.text)
-        await self.renderer.text_done()
-        try:
-            plan = parse_plan(goal, text)
-        except ValueError as exc:
-            await self.renderer.notice(f"plan error: {exc}", level="error")
-            return
-        self.tracker.load(plan)
+        """Create a plan, persist it under .daemon/plans/, and STOP.
+
+        Nothing executes here: /build is the separate, gated step.
+        """
+        from ..plans import draft_plan
+
+        record = await draft_plan(self.ctx, goal, created_by="repl")
+        self.tracker.load(record.plan)
+        self._active_plan_id = record.id
         self.renderer.rule("plan")
         self.renderer.task_list(self.tracker)
-        self.renderer.line("muted", "execute with /build (tasks run in order)")
+        self.renderer.line(
+            "muted",
+            f"plan {record.id} saved — edit with /edit-plan, execute "
+            f"with /build (approval required, tasks run in order)")
         if self.ctx.session is not None:
             self.ctx.session.add_user(f"/plan {goal}")
             self.ctx.session.add_assistant(
-                f"Plan created with {len(plan.tasks)} tasks:\n" +
-                "\n".join(f"- {task.id}. {task.title}" for task in plan.tasks))
+                f"Plan {record.id} created with {len(record.tasks)} tasks:\n" +
+                "\n".join(f"- {task.id}. {task.title}"
+                          for task in record.tasks))
+
+    def _cmd_edit_plan(self, rest: str) -> bool:
+        """The recorded edit path in the REPL (review round 2, R1-3).
+
+        Opens the active plan (or the id given) in $EDITOR and
+        records the result as a plan.edited kernel event, so the
+        edited content can execute. A file rewritten any other way
+        keeps the old kernel record and /build refuses it. The
+        in-memory tracker is rebuilt from the edited record, so
+        /tasks shows the edited tasks.
+        """
+        from ..plans import PlanError, PlanStore, edit_plan_record
+
+        plan_id = rest.strip() or self._active_plan_id
+        if plan_id is None:
+            self.renderer.line(
+                "muted", "no active plan; /plan <goal> first, or "
+                         "/edit-plan <id>")
+            return False
+        run_id = (self.ctx.session.meta.id
+                  if self.ctx.session is not None else None)
+        try:
+            record, changed = edit_plan_record(
+                PlanStore(self.ctx.workspace), plan_id, run_id=run_id)
+        except PlanError as exc:
+            self.renderer.line("error", str(exc))
+            return False
+        self.tracker.load(record.plan)
+        self._active_plan_id = record.id
+        if changed:
+            self.renderer.line(
+                "muted",
+                f"plan {record.id} edited — new version recorded in "
+                f"the event kernel (hash {record.hash[:12]}); "
+                f"execute with /build")
+        else:
+            self.renderer.line(
+                "muted",
+                f"plan {record.id} unchanged — it already matches the "
+                f"recorded version")
+        return False
 
     def _cmd_build(self, rest: str) -> bool:
         if self.tracker.plan is not None:
@@ -369,32 +451,72 @@ class Repl:
         return False
 
     async def _execute_plan(self, note: str) -> None:
+        """Execute the stored plan behind the broker gate (§2.3).
+
+        The stored record is re-loaded (schema + content hash) so a
+        plan rewritten outside the recorded edit path between /plan
+        and /build cannot run — only an edit recorded with
+        /edit-plan moves the kernel anchor the check binds to; the
+        broker asks for approval (the REPL's interactive approver);
+        per-task verification stops the loop on the first failure.
+        """
         assert self.tracker.plan is not None
-        while True:
-            task = self.tracker.plan.next_task()
-            if task is None:
-                break
-            self.tracker.start(task)
-            self.renderer.rule(f"task {task.id}: {task.title}")
-            brief = (f"Execute task {task.id}: {task.title}\n"
-                     f"{task.description}\n"
-                     + (f"Files: {', '.join(task.files)}\n" if task.files else "")
-                     + (f"Verification: {task.verification}\n"
-                        if task.verification else "")
-                     + (f"Note: {note}" if note else ""))
-            try:
-                result = await self.runtime.run(brief)
-                self.tracker.finish(
-                    task, success=not result.interrupted,
-                    result=result.text or "")
-                self.renderer.task_list(self.tracker)
-            except DaemonError as exc:
-                self.tracker.finish(task, success=False, result=str(exc))
-                self._render_error(exc)
-                break
+        from ..agent.planner import TaskTracker
+        from ..events import emit_plan_approved
+        from ..plans import PlanError, PlanStore, run_plan_tasks, verify_approved
+
+        plan_id = self._active_plan_id
+        if plan_id is None:
+            self.renderer.line(
+                "error", "no stored plan to execute — run /plan <goal> first")
+            return
+        try:
+            record = PlanStore(self.ctx.workspace).load(plan_id)
+        except PlanError as exc:
+            self.renderer.line("error", str(exc))
+            return
+        approved = self.ctx.permissions.approve_plan(
+            plan_id=record.id, goal=record.goal,
+            task_count=len(record.tasks),
+            files=[file for task in record.tasks for file in task.files],
+            plan_hash=record.hash, tasks=list(record.tasks))
+        if not approved:
+            self.renderer.line(
+                "warn", "plan execution not approved — nothing ran")
+            return
+        # Kernel-anchored approval (review round 1, R1-3a): the
+        # hash is recorded outside the workspace, and the file is
+        # re-read and checked against it before anything executes.
+        seq = None
+        if self.ctx.session is not None:
+            seq = emit_plan_approved(
+                self.ctx.session.meta.id, record.plan, via="/build",
+                plan_id=record.id, plan_hash=record.hash)
+        if seq is None:
+            self.renderer.line(
+                "error", "plan approval could not be recorded in the "
+                         "event kernel — refusing to execute")
+            return
+        try:
+            record = PlanStore(self.ctx.workspace).load(plan_id)
+            verify_approved(record)
+        except PlanError as exc:
+            self.renderer.line("error", str(exc))
+            return
+        # Fresh tracker from the VERIFIED record (review round 1,
+        # R1-3b): the tracker loaded at /plan time is stale — an
+        # edit between /plan and /build was validated above and
+        # then silently ignored when the old tracker ran.
+        self.tracker = TaskTracker()
+        self.tracker.load(record.plan)
+        done = await run_plan_tasks(self.runtime, self.tracker,
+                                    renderer=self.renderer, note=note)
         self.renderer.line(
-            "muted", "plan execution finished - /tasks for state, /diff for "
-                     "changes")
+            "muted",
+            "plan execution finished - /tasks for state, /diff for changes"
+            if done else
+            "plan stopped early — a task failed; /tasks for state, "
+            "/diff for changes")
 
     def _cmd_tasks(self, rest: str) -> bool:
         self.renderer.task_list(self.tracker)
@@ -593,7 +715,7 @@ class Repl:
                     "muted", f"    {meta.title[:70]} · "
                              f"{len(_safe_load(meta.id))} messages")
             return False
-        session = Session.load(rest)
+        session = Session.load(rest, lock=True)
         self.ctx.session = session
         self.runtime = self.ctx.build_runtime(
             ui=self.renderer, session=session,
@@ -663,6 +785,19 @@ class Repl:
         for skill in self._attached_skills:
             parts.append(f"Applied {skill.header()}:\n{skill.body}")
         return "\n\n".join(parts)
+
+
+def ask_demo_offer(input_fn=input) -> bool:
+    """One yes/no for the front-door demo offer; empty input = yes.
+
+    Factored out of :meth:`Repl._offer_demo` so the choice itself is
+    unit-testable without driving the REPL loop.
+    """
+    try:
+        answer = input_fn("Try the demo? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer in ("", "y", "yes")
 
 
 def _safe_load(session_id: str):
