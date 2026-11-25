@@ -7,6 +7,7 @@ from ..errors import AuthError, ProviderError
 from .anthropic import AnthropicAdapter
 from .base import ProviderAdapter
 from .catalog import ProviderDescriptor, provider_by_id
+from .demo import DemoAdapter
 from .gemini import GeminiAdapter
 from .openai_compat import OpenAICompatAdapter
 from .types import RemoteModel
@@ -15,6 +16,7 @@ _PROTOCOLS: dict[str, type[ProviderAdapter]] = {
     "openai": OpenAICompatAdapter,
     "anthropic": AnthropicAdapter,
     "gemini": GeminiAdapter,
+    "demo": DemoAdapter,
 }
 
 
