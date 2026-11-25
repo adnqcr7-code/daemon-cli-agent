@@ -1,0 +1,170 @@
+{
+  "tasks": [
+    {
+      "checks": {
+        "files_contain": {
+          "a.py": "\"\"\"Add.\"\"\""
+        }
+      },
+      "fixture": "fixtures/v090-selftest",
+      "id": "v090-selftest-legs",
+      "prompt": "Add a docstring to a.py",
+      "verify": [
+        "{python}",
+        "verify_selftest.py"
+      ]
+    },
+    {
+      "checks": {
+        "files_contain": {
+          "greeter.py": "\"\"\"Greet.\"\"\""
+        }
+      },
+      "fixture": "fixtures/v090-front-door-demo",
+      "id": "v090-front-door-demo",
+      "prompt": "Add a docstring to greeter.py"
+    },
+    {
+      "checks": {
+        "files_contain": {
+          "a.py": "\"\"\"Add.\"\"\""
+        }
+      },
+      "fixture": "fixtures/v090-front-door-init",
+      "id": "v090-front-door-init",
+      "prompt": "Add a docstring to a.py",
+      "verify": [
+        "{python}",
+        "verify_init.py"
+      ]
+    },
+    {
+      "checks": {
+        "files_contain": {
+          "a.py": "def add",
+          "greeter.py": "\"\"\"Greet.\"\"\""
+        }
+      },
+      "fixture": "fixtures/v090-plan-created",
+      "id": "v090-plan-created-not-executed",
+      "prompt": "Add a docstring to greeter.py",
+      "verify": [
+        "{python}",
+        "verify_plan_created.py"
+      ]
+    },
+    {
+      "checks": {
+        "files_contain": {
+          "a.py": "def add",
+          "greeter.py": "\"\"\"Greet.\"\"\""
+        }
+      },
+      "fixture": "fixtures/v090-plan-denied",
+      "id": "v090-plan-denied-executes-nothing",
+      "prompt": "Add a docstring to greeter.py",
+      "verify": [
+        "{python}",
+        "verify_plan_denied.py"
+      ]
+    },
+    {
+      "checks": {
+        "files_contain": {
+          "a.py": "\"\"\"Add.\"\"\""
+        }
+      },
+      "fixture": "fixtures/v090-env-reset",
+      "id": "v090-env-reset-identical",
+      "prompt": "Add a docstring to a.py",
+      "verify": [
+        "{python}",
+        "verify_env_reset.py"
+      ]
+    },
+    {
+      "checks": {
+        "files_contain": {
+          "a.py": "\"\"\"Add.\"\"\""
+        }
+      },
+      "fixture": "fixtures/v090-env-isolation",
+      "id": "v090-env-isolation",
+      "prompt": "Add a docstring to a.py",
+      "verify": [
+        "{python}",
+        "verify_env_isolation.py"
+      ]
+    },
+    {
+      "checks": {
+        "files_contain": {
+          "a.py": "\"\"\"Add.\"\"\""
+        }
+      },
+      "fixture": "fixtures/v090-diff-budget",
+      "id": "v090-diff-preview-budget",
+      "prompt": "Add a docstring to a.py",
+      "verify": [
+        "{python}",
+        "verify_diff_budget.py"
+      ]
+    },
+    {
+      "checks": {
+        "files_contain": {
+          "a.py": "\"\"\"Add.\"\"\""
+        }
+      },
+      "fixture": "fixtures/v090-undo",
+      "id": "v090-undo-restores-bytes",
+      "prompt": "Add a docstring to a.py",
+      "verify": [
+        "{python}",
+        "verify_undo.py"
+      ]
+    },
+    {
+      "checks": {
+        "files_contain": {
+          "a.py": "\"\"\"Add.\"\"\""
+        }
+      },
+      "fixture": "fixtures/v090-sandbox-denied",
+      "id": "v090-sandbox-denied",
+      "prompt": "Add a docstring to a.py",
+      "verify": [
+        "{python}",
+        "verify_sandbox.py"
+      ]
+    },
+    {
+      "checks": {
+        "files_contain": {
+          "a.py": "\"\"\"Add.\"\"\""
+        }
+      },
+      "fixture": "fixtures/v090-regression-demo-workspace",
+      "id": "v090-regression-demo-workspace",
+      "prompt": "Add a docstring to a.py",
+      "verify": [
+        "{python}",
+        "verify_demo_workspace.py"
+      ]
+    },
+    {
+      "checks": {
+        "files_contain": {
+          "a.py": "\"\"\"Add.\"\"\""
+        }
+      },
+      "fixture": "fixtures/v090-regression-audit-init",
+      "id": "v090-regression-audit-init",
+      "prompt": "Add a docstring to a.py",
+      "verify": [
+        "{python}",
+        "verify_audit_init.py"
+      ]
+    }
+  ]
+}

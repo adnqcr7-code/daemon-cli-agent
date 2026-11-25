@@ -1,0 +1,1 @@
+{"tasks":[{"checks":{"files_contain":{"greeter.py":"\"\"\"Greet.\"\"\""}},"fixture":"fixtures/demo-docstring","id":"demo-docstring","prompt":"Add a docstring to greeter.py"}]}
