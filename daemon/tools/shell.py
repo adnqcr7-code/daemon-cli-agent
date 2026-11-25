@@ -50,14 +50,19 @@ async def run_shell(
     env_extra: dict[str, str] | None = None,
     on_line=None,
     combined: bool = True,
+    sandbox_plan=None,
 ) -> tuple[int, str, bool]:
     """Run a command; returns (exit_code, output, timed_out).
 
     Shared by the shell tool, the test runner, formatters and doctor.
     Retained output is bounded, but oversized output is drained to completion
     rather than killing a useful command. Live output is capped separately.
+    When ``sandbox_plan`` is given (config sandbox.shell, §5), the
+    command runs inside bubblewrap per daemon/sandbox.py.
     """
     argv = shell_argv() + [command]
+    if sandbox_plan is not None:
+        argv = sandbox_plan.wrap(argv, cwd)
     env = strip_secret_env(None)
     if env_extra:
         env.update(env_extra)
@@ -193,8 +198,11 @@ class RunCommandTool(Tool):
         async def on_line(line: str) -> None:
             await ctx.emit(self.name, line)
 
+        from ..sandbox import plan_for
+
         exit_code, output, timed_out = await run_shell(
-            command, cwd=cwd, timeout_s=timeout, on_line=on_line)
+            command, cwd=cwd, timeout_s=timeout, on_line=on_line,
+            sandbox_plan=plan_for(ctx.config, ctx.workspace_root))
         verdict = "timed out" if timed_out else f"exit code {exit_code}"
         content = f"$ {command}\n{output}\n[{verdict}]"
         if timed_out or exit_code != 0:

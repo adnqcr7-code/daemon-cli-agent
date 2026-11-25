@@ -182,6 +182,7 @@ class FindSymbolsTool(Tool):
         else:
             files = [p for p in _source_files(root)][:400]
         results: list[str] = []
+        symbol_rows: list[dict] = []
         method = "ast + heuristic"
         lsp_error = None
         for path in files:
@@ -218,9 +219,17 @@ class FindSymbolsTool(Tool):
                 results.append(
                     f"{rel}:{symbol['line']} {symbol['kind']} "
                     f"{symbol['name']}{symbol['signature']}")
+                # Structured rows for Reflex Phase 2 capture: the same
+                # facts as the text lines, kept as data so a consumer
+                # never has to re-parse text (a newline inside a file
+                # name stays inside this row's "path" field).
+                symbol_rows.append({
+                    "name": symbol["name"], "kind": symbol["kind"],
+                    "path": rel, "line": symbol["line"]})
         if not results:
             note = f"\n[LSP unavailable: {lsp_error}; used fallback analysis]" if lsp_error else ""
-            return ToolOutput(content="No symbols found." + note)
+            return ToolOutput(content="No symbols found." + note,
+                              metadata={"method": method, "symbols": []})
         truncated = "" if len(results) <= 400 else "\n[truncated at 400 symbols]"
         fallback_note = (
             f"\n[LSP unavailable: {lsp_error}; used fallback analysis]"
@@ -228,7 +237,7 @@ class FindSymbolsTool(Tool):
         return ToolOutput(
             content="\n".join(results[:400]) + truncated +
                     f"\n[analysis: {method}]" + fallback_note,
-            metadata={"method": method})
+            metadata={"method": method, "symbols": symbol_rows[:400]})
 
 
 def _source_files(root: Path, limit: int = 400) -> list[Path]:
@@ -287,8 +296,11 @@ class ReferencesTool(Tool):
                 ctx, root, args["line"], args["column"])
             if locations is not None:
                 if not locations:
-                    return ToolOutput(content=f"No LSP references to '{symbol}' found.")
+                    return ToolOutput(
+                        content=f"No LSP references to '{symbol}' found.",
+                        metadata={"method": "lsp", "references": []})
                 rows = []
+                reference_rows: list[dict] = []
                 for location in locations[:400]:
                     uri = str(location.get("uri") or location.get("targetUri") or "")
                     target = uri_path(uri)
@@ -300,12 +312,18 @@ class ReferencesTool(Tool):
                                       or location.get("targetSelectionRange")
                                       or location.get("targetRange") or {})
                     start = location_range.get("start", {})
+                    line_no = int(start.get('line', 0)) + 1
                     rows.append(
-                        f"{target}:{int(start.get('line', 0)) + 1}:"
+                        f"{target}:{line_no}:"
                         f"{int(start.get('character', 0)) + 1}")
+                    reference_rows.append({
+                        "path": str(target), "line": line_no,
+                        "name": symbol})
                 return ToolOutput(
                     content=f"'{symbol}': {len(locations)} LSP reference(s)\n" +
-                            "\n".join(rows))
+                            "\n".join(rows),
+                    metadata={"method": "lsp",
+                              "references": reference_rows})
         else:
             lsp_error = None
         word = re.compile(rf"\b{re.escape(symbol)}\b")
@@ -336,14 +354,19 @@ class ReferencesTool(Tool):
         if not hits:
             note = f" LSP unavailable ({lsp_error}); " if lsp_error else ""
             return ToolOutput(content=f"No references to '{symbol}' found.{note}")
-        body = "\n".join(f"{file}: {count}" for file, count in sorted(hits))
+        ordered = sorted(hits)
+        body = "\n".join(f"{file}: {count}" for file, count in ordered)
         total = sum(count for _, count in hits)
         method_note = (
             f"\n[LSP unavailable: {lsp_error}; using lexical/AST fallback]"
             if lsp_error else "")
         return ToolOutput(
             content=f"'{symbol}': {total} reference(s) in {len(hits)} file(s)\n"
-                    f"{body}{method_note}")
+                    f"{body}{method_note}",
+            metadata={"method": "fallback",
+                      "reference_counts": [
+                          {"path": file, "count": count, "name": symbol}
+                          for file, count in ordered]})
 
 
 def _rel(path: Path, root: Path) -> str:
@@ -408,9 +431,12 @@ class DiagnosticsTool(Tool):
 
 
 async def _run_tool(command: str, ctx: ToolContext):
+    from ..sandbox import plan_for
     from .shell import run_shell
 
-    return await run_shell(command, cwd=ctx.workspace_root, timeout_s=120)
+    return await run_shell(
+        command, cwd=ctx.workspace_root, timeout_s=120,
+        sandbox_plan=plan_for(ctx.config, ctx.workspace_root))
 
 
 def _python_syntax_report(root: Path) -> str:
@@ -527,11 +553,30 @@ class RunTestsTool(Tool):
         if not candidates:
             candidates.append(("pytest", f"python -m pytest -q {target} {extra}".strip()))
 
+        from ..agent.verify import tool_module_block
+        from ..sandbox import plan_for
         from .shell import run_shell
 
         for label, command in candidates:
+            if label == "pytest":
+                # Same tool-shadowing guard as verification (round
+                # 4, R3-1): this tool also executes `python -m
+                # pytest` with the workspace as cwd, so a planted
+                # pytest.py at the workspace root would run in place
+                # of the real runner and its exit code would decide
+                # the reported summary.
+                block = tool_module_block(
+                    shutil.which("python") or sys.executable,
+                    "pytest", root)
+                if block is not None:
+                    return ToolOutput(
+                        content=f"$ {command}\nrefused: {block}",
+                        is_error=True,
+                        display=f"[pytest] BLOCKED - {block}",
+                        metadata={"exit_code": 126, "runner": label})
             exit_code, output, timed_out = await run_shell(
-                command, cwd=root, timeout_s=self.timeout_s)
+                command, cwd=root, timeout_s=self.timeout_s,
+                sandbox_plan=plan_for(ctx.config, ctx.workspace_root))
             summary = _parse_test_summary(label, output, exit_code, timed_out)
             content = f"$ {command}\n{output[-8000:]}\n\n{summary}"
             return ToolOutput(content=content, is_error=exit_code != 0,

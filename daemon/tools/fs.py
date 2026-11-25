@@ -153,6 +153,11 @@ class WriteFileTool(Tool):
         path = resolve_in_root(ctx.workspace_root, args["path"])
         if path.exists() and path.is_dir():
             raise ToolError(f"{args['path']} is a directory.")
+        # The pre-write content, for the display diff (§2.5): the
+        # same computation as the ASK preview (original vs new).
+        original = ""
+        if path.is_file():
+            original = await asyncio.to_thread(path.read_text, "utf-8")
         await _checkpoint(ctx, path)
         if args.get("create_dirs", True):
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -168,6 +173,7 @@ class WriteFileTool(Tool):
         rel = _relative(path, ctx.workspace_root)
         return ToolOutput(
             content=f"Wrote {len(args['content'])} chars to {rel}.",
+            display=unified_diff_text(original, args["content"], rel),
             metadata={"path": rel, "bytes": len(args["content"])})
 
 
