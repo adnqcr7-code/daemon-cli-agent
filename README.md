@@ -58,22 +58,24 @@ exact command to use; you do not need to edit TOML by hand.
 
 ### Install the latest release
 
-With Python 3.11 or newer, install Daemon from PyPI — one line, using
-whichever Python tool you already have:
+> **PyPI publishing is pending** — `daemon-agent` is not on PyPI yet;
+> trusted-publisher setup is the last step. Until it lands, install the
+> wheel attached to the GitHub Release.
+
+With Python 3.11 or newer, install the v0.9.0 wheel from
+[GitHub Releases](https://github.com/adnqcr7-code/daemon-cli-agent/releases/tag/v0.9.0):
 
 ```bash
-pipx install "daemon-agent[keyring,crypto,repl]"     # recommended
-# or: uvx --from "daemon-agent[keyring,crypto,repl]" daemon
-# or: python -m pip install "daemon-agent[keyring,crypto,repl]"
+pipx install "https://github.com/adnqcr7-code/daemon-cli-agent/releases/download/v0.9.0/daemon_agent-0.9.0-py3-none-any.whl"
+# or: python -m pip install "https://github.com/adnqcr7-code/daemon-cli-agent/releases/download/v0.9.0/daemon_agent-0.9.0-py3-none-any.whl"
 
 daemon auth add
 cd /path/to/your-project
 daemon
 ```
 
-Releases are also attached to
-[GitHub Releases](https://github.com/adnqcr7-code/daemon-cli-agent/releases)
-as wheels if you prefer to install a specific build directly.
+Once PyPI publishing is enabled, the install becomes one line:
+`pipx install "daemon-agent[keyring,crypto,repl]"`.
 
 For source installs and development, use the platform installers below.
 
