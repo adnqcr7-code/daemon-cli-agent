@@ -10,12 +10,15 @@ context compaction and clean cancellation.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config import Config
 from ..errors import Interrupted, UsageLimitExceeded
+from ..events import emit as emit_event
+from ..events import message_payload, truncate_content
 from ..log import audit, get_logger
 from ..models import estimate_cost_usd
 from ..permissions import Effect, PermissionEngine
@@ -40,8 +43,8 @@ from .context import (
 from .failure_detector import FailureLoopDetector
 from .optimizer import ContextOptimizer
 from .prompts import build_system_prompt
-from .reflex import ReflexEngine, ReflexTrajectory
-from .session import Session
+from .reflex import ReflexEngine, ReflexStore, ReflexTrajectory
+from .session import Session, redact_safe
 from .tool_selector import ToolSelector
 
 _logger = get_logger("agent")
@@ -85,6 +88,14 @@ class AgentUI:
     async def approval(self, decision) -> tuple[bool, bool]:
         return False, False
 
+    # No-op display hooks, so plan-mode execution (which renders task
+    # progress) can run against the silent UI too, e.g. --json runs.
+    def rule(self, title: str) -> None: ...
+
+    def task_list(self, tracker) -> None: ...
+
+    def line(self, level: str, text: str) -> None: ...
+
 
 _MUTATING_METADATA_KEYS = ("path", "target")
 
@@ -109,6 +120,7 @@ class AgentRuntime:
         role: str = "build",
         system_prompt: str | None = None,
         extra_context=None,          # Callable[[], str] appended to the prompt
+        env_dir: Path | None = None,
     ) -> None:
         self.adapter = adapter
         self.model = model
@@ -131,6 +143,11 @@ class AgentRuntime:
         workspace_root = workspace or (
             Path(session.meta.workspace) if session.meta.workspace else Path.cwd())
         self.workspace = Path(workspace_root).resolve()
+        # The demo provider's scenario engine needs the workspace to
+        # decide which task tokens name real files (review round 2,
+        # V11); it is the only adapter with a workspace slot.
+        if hasattr(adapter, "workspace"):
+            adapter.workspace = self.workspace
         self.tool_ctx = ToolContext(
             self.workspace, config, checkpoints=checkpoints, memory=memory,
             compact_context=self._compact_context_for_tool,
@@ -144,8 +161,28 @@ class AgentRuntime:
         self._optimization_enabled = config.get("optimization.enabled", True) if config else True
         self.tool_selector = ToolSelector(config)
         self.failure_detector = FailureLoopDetector(config)
-        self.reflex = ReflexEngine(config, workspace=self.workspace)
+        # Env-scoped reflex (§2.4): with an env, the store lives under
+        # the env's state dir; without one, the workspace default.
+        # The env name is the dir name (envs/<name>), or None.
+        self.env_dir = Path(env_dir) if env_dir is not None else None
+        self.env_name = self.env_dir.name if self.env_dir else None
+        reflex_store = (ReflexStore(self.workspace, env_dir=self.env_dir)
+                        if self.env_dir is not None else None)
+        self.reflex = ReflexEngine(config, workspace=self.workspace,
+                                   store=reflex_store)
         self._reflex_notice: str | None = None
+        # Cache discipline (prefix.py): the guard enforces the stable
+        # system prefix + append-only history for each run; the frozen
+        # prompt is computed once at run start.
+        from .prefix import PrefixGuard
+
+        self._prefix_guard = PrefixGuard()
+        self._run_system_prompt: str | None = None
+        # Reasoning traces are stored separately from history
+        # (reasoning.py) — one store per runtime, keyed by run id.
+        from .reasoning import ReasoningStore
+
+        self._reasoning_store = ReasoningStore()
         self._current_task = ""
         self._tool_prune_reported = False
         self._failure_nudge: str | None = None
@@ -157,6 +194,14 @@ class AgentRuntime:
         self._repomap_cache_task: str | None = None
         self._repomap_cache = ""
 
+    @property
+    def verification_passed(self) -> bool | None:
+        """Outcome of the last run's enforced post-turn verification:
+        True/False when verification ran, None when nothing changed
+        (or verification is disabled). The plan-mode loop (§2.3) stops
+        on False."""
+        return self._verification_passed
+
     # ------------------------------------------------------------------ run
 
     async def run(self, user_text: str) -> RunResult:
@@ -164,9 +209,47 @@ class AgentRuntime:
         result = RunResult()
         started = time.perf_counter()
         self._active_result = result
-        self.session.add_user(user_text)
+        user_message = self.session.add_user(user_text)
+        # Crash-safe journal (§4): the meta says "running" on disk
+        # from the outset; if this process dies mid-run, the session
+        # is listed as interrupted and resumes from the journal.
+        # The meta also records THIS process as the owner (V5): a
+        # listing process can then tell a live run from a dead one
+        # instead of calling every "running" meta interrupted.
+        self.session.meta.status = "running"
+        self.session.meta.pid = os.getpid()
+        self.session.save_meta()
+        # Event kernel (v0.9.0 Phase 1): this run's id for the
+        # permission engine and the checkpoint manager, then the
+        # run's first events (run.started, then the user message).
+        self.permissions.run_id = self.session.meta.id
+        if self.checkpoints is not None:
+            self.checkpoints.run_id = self.session.meta.id
+        self._event("run.started", {
+            "task": user_text[:2000],
+            "truncated": len(user_text) > 2000,
+            "model": self.model.model_id, "provider": self.model.provider,
+            "workspace": str(self.workspace),
+            "env": self.env_name})
+        self._event("message.user",
+                    message_payload(redact_safe(user_message)))
+        # The run holds the session's resume lock for its whole
+        # lifetime (round 3, R2-5): liveness checks treat a held
+        # lock as the primary "owner is alive" signal, ahead of the
+        # pid (pids get recycled; locks do not lie). Resumed
+        # sessions already hold it (load(lock=True)) and acquire is
+        # idempotent on this object. Best effort - a lock failure
+        # must not kill the run.
+        try:
+            self.session.acquire_lock()
+        except Exception as exc:  # noqa: BLE001
+            _logger.debug("session lock not acquired: %s", exc)
         self._current_task = user_text
         self._tool_prune_reported = False
+        # Freeze the system prompt for this run and re-baseline the
+        # prefix guard (a REPL reuses the runtime across runs).
+        self._run_system_prompt = self.system_prompt()
+        self._prefix_guard.reset("run start")
         self._opt_context_saved = 0
         self._failed_tool_calls = 0
         self._failure_loops = 0
@@ -174,12 +257,18 @@ class AgentRuntime:
         self.reflex.begin_turn()
         max_turns = self.config.max_turns() if self.config else 40
         repair_attempts = 0
+        tool_call_repair_attempts = 1
         if self.config is not None:
             try:
                 repair_attempts = int(
                     self.config.get("verification.repair_attempts", 1) or 0)
             except (TypeError, ValueError):
                 repair_attempts = 0
+            try:
+                tool_call_repair_attempts = int(
+                    self.config.get("tool_call.repair_attempts", 1) or 0)
+            except (TypeError, ValueError):
+                tool_call_repair_attempts = 0
         try:
             while True:
                 for step in range(1, max_turns + 1):
@@ -188,6 +277,7 @@ class AgentRuntime:
                     await self._maybe_compact(tool_specs)
                     if self.optimizer and self._optimization_enabled:
 
+                        before_messages = self.session.messages
                         self.session.messages, opt_stats = await self.optimizer.optimize(
                             self.session.messages,
                             tool_specs,
@@ -196,6 +286,11 @@ class AgentRuntime:
                             model_id=self.model.model_id,
                             on_usage=self._record_aux_usage,
                         )
+                        if self.session.messages != before_messages:
+                            # Sanctioned rewrite: re-baseline the guard
+                            # so the next check starts from the new history.
+                            self._prefix_guard.reset(
+                                "context optimization rewrote history")
                         self._opt_context_saved += opt_stats.tokens_saved
                         if opt_stats.tokens_saved > 0:
                             await self.ui.notice(
@@ -210,15 +305,72 @@ class AgentRuntime:
                             f"{selection.original_count} (saves ~"
                             f"{selection.tokens_saved} tokens per request).",
                             level="debug")
-                    text, calls, usage = await self._stream_once()
+                    text, calls, usage, thinking = await self._stream_once()
+                    if thinking:
+                        # Reasoning traces (DeepSeek reasoning_content,
+                        # Anthropic thinking, ...) are stored separately
+                        # from the conversation and never replayed as
+                        # history (reasoning.py).
+                        self._reasoning_store.append(
+                            self.session.meta.id, thinking,
+                            provider=self.model.provider,
+                            model=self.model.model_id)
                     if usage is not None:
                         await self._record_usage(usage, result)
-                    self.session.add_assistant(text or None, calls or None)
+                    if calls:
+                        # Malformed tool-call repair (Phase 3): validate
+                        # -> repair -> retry -> fallback to plan-only.
+                        # Nothing executes on a call we could not validate.
+                        from .toolcall_repair import repair_calls
+
+                        repaired_calls, call_errors = repair_calls(
+                            calls, self.registry)
+                        if call_errors:
+                            if tool_call_repair_attempts > 0:
+                                tool_call_repair_attempts -= 1
+                                repair_prompt = (
+                                    "Your last tool call could not be used "
+                                    "(malformed):\n"
+                                    + "\n".join(f"- {error}"
+                                                for error in call_errors)
+                                    + "\nReply with corrected tool calls in "
+                                      "valid JSON, or with a text-only plan "
+                                      "and no tool calls.")
+                                repair_message = self.session.add_user(
+                                    repair_prompt)
+                                self._event("message.user",
+                                            message_payload(redact_safe(
+                                                repair_message)))
+                                await self.ui.notice(
+                                    "Malformed tool call — asking the model "
+                                    "to retry with corrected calls.",
+                                    level="warn")
+                                continue
+                            result.text = self._plan_only_fallback(
+                                text, call_errors)
+                            assistant_message = self.session.add_assistant(
+                                result.text)
+                            self._event("message.assistant", message_payload(
+                                redact_safe(assistant_message)))
+                            self._journal_session()
+                            break
+                        if repaired_calls != calls:
+                            await self.ui.notice(
+                                "Repaired a malformed tool call "
+                                "mechanically (no model retry needed).",
+                                level="debug")
+                        calls = repaired_calls
+                    assistant_message = self.session.add_assistant(
+                        text or None, calls or None)
+                    self._event("message.assistant", message_payload(
+                        redact_safe(assistant_message)))
                     if not calls:
                         result.text = text or ""
+                        self._journal_session()
                         break
                     results = await self._execute_calls(calls, result)
                     self.session.add_tool_results(results)
+                    self._journal_session()
                     await self._check_failure_loop()
                 else:
                     result.text = (result.text or
@@ -236,7 +388,9 @@ class AgentRuntime:
                 await self.ui.notice(
                     "Verification failed - sending the failures back "
                     "to the agent for a repair attempt.", level="warn")
-                self.session.add_user(outcome.repair_prompt())
+                repair_message = self.session.add_user(outcome.repair_prompt())
+                self._event("message.user",
+                            message_payload(redact_safe(repair_message)))
         except asyncio.CancelledError:
             result.interrupted = True
             audit("agent-interrupted", model=self.model.model_id)
@@ -245,13 +399,67 @@ class AgentRuntime:
             result.duration_s = time.perf_counter() - started
             self._active_result = None
             await self.ui.text_done()
+            self.session.meta.status = (
+                "interrupted" if result.interrupted else "complete")
             self.session.save()
             self._save_optimization_report(result)
+            self._event("run.finished", {
+                "interrupted": result.interrupted,
+                "duration_s": round(result.duration_s, 3),
+                "steps": result.steps, "tool_calls": result.tool_calls,
+                "files_changed": result.files_changed,
+                "verification": result.verification})
         return result
+
+    def _journal_session(self) -> None:
+        """Persist the just-completed turn (flush + fsync, §4).
+
+        Best effort: a journaling failure must not kill the run -
+        the finally-block save() still applies, and the failure is
+        logged. Silence-on-error matches the reflex/optimizer rule.
+        """
+        try:
+            self.session.journal()
+        except Exception as exc:  # noqa: BLE001
+            _logger.debug("session journal failed: %s", exc)
+
+    def _plan_only_fallback(self, text: str | None,
+                            errors: list[str]) -> str:
+        """The last rung of the tool-call repair ladder: no tools run.
+
+        The model kept producing calls the runtime could not validate
+        after the retry, so the turn ends with a text-only plan. The
+        goal, the model's own words, and the validation errors are all
+        in the text so the user can see what was attempted and why
+        nothing executed.
+        """
+        lines = [
+            "Plan only — no tools were executed.",
+            "",
+            f"Task: {self._current_task or '(none)'}",
+        ]
+        if text:
+            lines += ["", "The model said:", text]
+        lines += ["",
+                  "The tool calls could not be used (malformed):"]
+        lines += [f"- {error}" for error in errors]
+        lines += ["",
+                  "Nothing was changed. Rephrase the task or fix the "
+                  "model's tool-call format and try again."]
+        return "\n".join(lines)
+
+    def _event(self, type: str, payload: dict) -> None:
+        """Append one kernel event for this run (v0.9.0 Phase 1).
+
+        Best effort by construction: events.emit never raises, so a
+        dead event store cannot change the run's behavior.
+        """
+        emit_event(self.session.meta.id, type, payload)
 
     # --------------------------------------------------------------- stream
 
-    async def _stream_once(self) -> tuple[str, list[ToolCall] | None, Usage | None]:
+    async def _stream_once(
+            self) -> tuple[str, list[ToolCall] | None, Usage | None, str]:
         request = self._build_request()
         if self._reflex_notice:
             await self.ui.notice(
@@ -277,7 +485,10 @@ class AgentRuntime:
         full_text = "".join(text_parts)
         if thinking_parts and not full_text:
             full_text = ""
-        return full_text, tool_calls, usage
+        # The reasoning trace is returned separately from the answer
+        # text: the caller stores it apart from history (reasoning.py)
+        # and it is never fed back into the conversation.
+        return full_text, tool_calls, usage, "".join(thinking_parts)
 
 
 
@@ -288,12 +499,29 @@ class AgentRuntime:
         return [ToolSpec(**tool.spec()) for tool in tools]
 
     def _build_request(self) -> ChatRequest:
-        system = self.system_prompt()
+        # Cache discipline (Phase 3): the system prompt is computed
+        # once per run and frozen — recomputing it per turn let the
+        # context-estimate suffix change it every turn and silently
+        # invalidate the provider's cached prefix. One-shot additions
+        # (failure nudge, context estimate) go on the request copy's
+        # TAIL as user messages, never into the system prompt, never
+        # into the session — the same pattern as the Reflex signal.
+        system = (self._run_system_prompt
+                  if self._run_system_prompt is not None
+                  else self.system_prompt())
+        messages = list(self.session.messages)
+        self._prefix_guard.check(system, messages)
         # A failure-loop nudge is delivered once, on the next request only.
         if self._failure_nudge:
-            system += f"\n\nFailure-loop intervention: {self._failure_nudge}"
+            messages.append(Message.user(
+                "Failure-loop intervention: " + self._failure_nudge))
             self._failure_nudge = None
-        messages = list(self.session.messages)
+        usage = self.context_usage_pct()
+        if usage is not None:
+            messages.append(Message.user(
+                f"Context estimate: {usage:.0%} of the usable context "
+                "budget. This is an estimate, not provider-reported usage. "
+                "Prefer smaller tools and shorter outputs as it grows."))
         # Reflex soft signal (design v4 section 3.1): appended to the
         # conversation TAIL of this request copy only - never written to
         # the session transcript and never into the system prompt, so the
@@ -372,7 +600,21 @@ class AgentRuntime:
             except Exception as exc:  # noqa: BLE001
                 outcomes[call.id] = self._wrap_exception(call, exc)
         result.tool_calls += len(calls)
-        return [outcomes[call.id] for call in calls if call.id in outcomes]
+        ordered = [outcomes[call.id] for call in calls if call.id in outcomes]
+        # Event kernel: one tool.result per result, in CALL order.
+        # The transcript's tool message is in call order, but
+        # read-only calls execute in parallel - emitting here (not in
+        # _execute_one) is what makes the projection group them
+        # exactly as the transcript does.
+        for outcome in ordered:
+            content, truncated, content_chars = truncate_content(
+                outcome.content)
+            self._event("tool.result", {
+                "tool_call_id": outcome.tool_call_id,
+                "tool_name": outcome.tool_name,
+                "content": content, "is_error": outcome.is_error,
+                "truncated": truncated, "content_chars": content_chars})
+        return ordered
 
     def _wrap_exception(self, call: ToolCall, outcome: object) -> ToolResult:
         if isinstance(outcome, ToolResult):
@@ -398,6 +640,20 @@ class AgentRuntime:
             network=tool.network)
         if decision.effect is Effect.ASK:
             result.permission_prompts += 1
+            # Diff preview (§2.5): for a file edit, show the actual
+            # unified diff the edit would produce — computed from the
+            # live file without mutating anything, truncated to the
+            # display budget. The same computation the tool reports
+            # afterwards (ToolOutput.display).
+            from ..diffs import diff_budget_from_config, preview_edit_diff, truncate_diff
+
+            preview = preview_edit_diff(self.workspace, call.name,
+                                        call.arguments)
+            if preview is not None:
+                max_lines, max_tokens = diff_budget_from_config(
+                    self.config)
+                decision.diff_preview = truncate_diff(
+                    preview, max_lines=max_lines, max_tokens=max_tokens)
             decision = await self._resolve_approval(decision)
         if decision.effect is not Effect.ALLOW:
             message = (f"Permission denied for {call.name}: "
@@ -411,6 +667,12 @@ class AgentRuntime:
                                            message, is_error=True)
             return ToolResult(tool_call_id=call.id, tool_name=call.name,
                               content=message, is_error=True)
+        # Event kernel: the call is about to happen (a denied call
+        # emits no tool.called - nothing was called; the denial is
+        # already a permission.decided event).
+        self._event("tool.called", {
+            "tool_call_id": call.id, "tool_name": call.name,
+            "summary": _summarize_args(call.arguments)})
         output = await self.registry.execute(call.name, call.arguments,
                                              self.tool_ctx)
         if output.is_error:
@@ -420,7 +682,8 @@ class AgentRuntime:
                                      is_error=output.is_error)
         self.reflex.record_tool_result(call.name, call.arguments,
                                        output.content,
-                                       is_error=output.is_error)
+                                       is_error=output.is_error,
+                                       metadata=output.metadata)
         if not output.is_error and call.name in _FILE_TOOLS:
             path = output.metadata.get("path")
             if path and path not in result.files_changed:
@@ -444,6 +707,14 @@ class AgentRuntime:
         else:
             decision.effect = Effect.DENY
             audit("permission-denied", tool=decision.tool, detail=decision.summary)
+        # Event kernel: the ASK resolution is a second decision point
+        # (see permissions._finish); record the final effect.
+        self._event("permission.decided", {
+            "tool": decision.tool, "effect": decision.effect.value,
+            "target": (decision.files[0] if decision.files else "-"),
+            "reason": decision.reasons[0] if decision.reasons
+                      else "default policy",
+            "key": decision.key, "via": "approval"})
         return decision
 
     def _fence(self, name: str, output: ToolOutput) -> str:
@@ -507,14 +778,22 @@ class AgentRuntime:
             outcome = await verify_changes(
                 self.workspace, result.files_changed,
                 run_tests=run_tests, run_lint=run_lint,
-                run_typecheck=run_typecheck, timeout_s=timeout)
+                run_typecheck=run_typecheck, timeout_s=timeout,
+                permissions=self.permissions, config=self.config)
         except Exception as exc:  # noqa: BLE001 - verification must never crash a run
             result.verification = f"verification could not run: {exc}"
             await self.ui.notice(
                 f"[daemon verification] {result.verification}", level="warn")
+            self._event("verification.result", {
+                "passed": False, "summary": result.verification,
+                "checks": []})
             return None
         self._verification_passed = outcome.passed
         result.verification = outcome.summary()
+        self._event("verification.result", {
+            "passed": outcome.passed, "summary": outcome.summary(),
+            "checks": [{"label": check.label, "passed": check.passed}
+                       for check in outcome.checks]})
         level = "info" if outcome.passed else "warn"
         await self.ui.notice(f"[daemon verification] {result.verification}",
                              level=level)
@@ -651,6 +930,8 @@ class AgentRuntime:
             await self.ui.notice(f"Compaction failed: {exc}", level="warn")
             return False
         self.session.messages = new_messages
+        # Sanctioned rewrite: re-baseline the prefix guard.
+        self._prefix_guard.reset("compaction rewrote history")
         self.session.meta.compacted = True
         self.session.rewrite_transcript()
         self.session.save()
@@ -745,17 +1026,12 @@ class AgentRuntime:
                 memory_block=memory_block,
                 extra=self.extra_context() if self.extra_context else "",
             )
-        usage = self.context_usage_pct()
-        if usage is not None:
-            prompt += (
-                f"\n\nContext estimate: {usage:.0%} of the usable context "
-                "budget. This is an estimate, not provider-reported usage. "
-                "When it approaches 70%, use the compact_context tool to "
-                "summarize older history while retaining task-critical facts."
-            )
-        if self._failure_nudge:
-            prompt += ("\n\nFailure-loop intervention:\n"
-                       + self._failure_nudge)
+        # The base prompt is deliberately stable: the per-turn context
+        # estimate and the one-shot failure nudge are NOT appended
+        # here — _build_request puts them on the request copy's tail
+        # so the cached prefix stays byte-stable across turns
+        # (prefix.py). Callers that need the estimate use
+        # context_usage_pct() directly.
         return prompt
 
 

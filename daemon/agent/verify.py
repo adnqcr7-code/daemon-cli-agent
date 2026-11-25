@@ -16,17 +16,47 @@ A verification failure does not roll anything back — the edits stay, the
 user sees exactly what failed, and the agent's final message says so.
 ``VerificationResult.repair_prompt()`` turns a failure into a message
 that can be fed back to the agent for a repair attempt.
+
+Every command verification runs goes through the SAME path as the
+shell tool (review round 2, V3): a permission-engine ``check()``
+(which audit-logs the decision) resolved through the engine, then
+the shared ``run_shell`` executor — secret-stripped environment and,
+when ``sandbox.shell`` is enabled, the bubblewrap wrap. Verification
+is automatic and runs project code after every edit turn, so it must
+never be a broker blind spot: no raw subprocess, no inherited
+environment, no unlogged execution. The check classifies each
+command's LOGICAL form (``python -m pytest -q .``); the argv that
+executes is normalized to this interpreter's absolute path, which
+the classifier would rate "unknown" and a non-interactive run would
+deny (round 3, R2-1).
+
+Classified and executed must also be the same PROGRAM (round 4,
+R3-1): ``python -m <tool>`` resolves ``<tool>`` with the workspace
+first on ``sys.path``, so a ``pytest.py`` planted at the workspace
+root used to execute in place of the real tool and mint a green
+"verification passed" under an ALLOW naming the real one. Before
+any ``python -m X`` verification command runs, :func:`tool_module_block`
+fails the check closed when the workspace root carries a shadowing
+entry for X - decided with plain pathlib in this process, never by
+an interpreter started inside the workspace (round 5, R4-1: a
+planted ``json.py`` blinded the round-4 probe itself) - and an
+isolated (``python -I``) probe of the same interpreter must still
+confirm a clean origin for X outside the workspace.
 """
 
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import json
+import shlex
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from ..permissions import Effect
+from ..security import strip_secret_env
 
 
 @dataclass
@@ -209,22 +239,161 @@ def _command_argv(command: str) -> list[str]:
     return argv
 
 
-async def _run(argv: list[str], cwd: Path, timeout_s: float) -> tuple[int, str, bool]:
-    """Run ``argv`` (no shell) and return (exit code, output tail, timed out)."""
+# The only modules verification ever executes via ``python -m``
+# (round 4, R3-1). The origin probe below refuses to resolve any
+# other name: the set is daemon's own, never project input.
+_MODULE_TOOLS = frozenset({"pytest", "ruff", "mypy", "compileall"})
+
+# find_spec() locates a module WITHOUT executing it (for a top-level
+# name it runs no project code at all). The probe runs the SAME
+# interpreter in ISOLATED mode (``python -I``: implies -E and -s, and
+# the script's directory / cwd / PYTHONPATH are excluded from
+# sys.path), so the probe's OWN imports - importlib, json - resolve
+# from the real stdlib and can never be shadowed by the workspace
+# under review (round 5, R4-1: a planted ``json.py`` used to blind
+# the round-4 probe, whose cwd WAS the workspace, and the planted
+# tool then executed). The probe therefore only ever reports the
+# CLEAN origin of a module; whether the workspace shadows it is
+# decided separately, in this process, by _workspace_shadow().
+_PROBE_PROGRAM = (
+    "import importlib.util, json, sys\n"
+    "spec = importlib.util.find_spec(sys.argv[1])\n"
+    "paths = []\n"
+    "if spec is not None:\n"
+    "    if spec.origin:\n"
+    "        paths.append(spec.origin)\n"
+    "    if spec.submodule_search_locations:\n"
+    "        paths.extend(spec.submodule_search_locations)\n"
+    "print(json.dumps(paths))\n"
+)
+
+
+def _workspace_shadow(root: Path, module: str) -> Path | None:
+    """The workspace entry that would shadow ``module``, if any.
+
+    Decided HERE, in the daemon process, with plain pathlib - no
+    interpreter is started in the workspace and no workspace code
+    is imported, so nothing the workspace contains can influence
+    the answer (round 5, R4-1). ``python -m X`` puts exactly one
+    workspace directory first on ``sys.path``: the process's cwd,
+    which for verification is the workspace root. A top-level name
+    X resolves from that directory via exactly three entry shapes,
+    and all three are checked: a module file ``X.py``, a sourceless
+    module ``X.pyc``, and a package directory ``X/`` - with an
+    ``__init__.py`` (a regular package) or without one (a namespace
+    package portion, which still wins over an installed REGULAR
+    package at execution time only if it supplies the module - and
+    for ``-m`` execution a namespace portion with a ``__main__``
+    does run; failing closed on any ``X/`` is the safe reading).
+    Returns the shadowing path to name in the refusal, else None.
+    """
+    module_file = root / f"{module}.py"
+    if module_file.is_file():
+        return module_file
+    bytecode_file = root / f"{module}.pyc"
+    if bytecode_file.is_file():
+        return bytecode_file
+    package_dir = root / module
+    if package_dir.is_dir():
+        init_file = package_dir / "__init__.py"
+        return init_file if init_file.is_file() else package_dir
+    return None
+
+
+def tool_module_block(python: str, module: str,
+                      workspace: Path) -> str | None:
+    """Why ``python -m module`` must not execute from ``workspace``.
+
+    Returns a failure detail when the command is blocked, None when
+    it may run. ``python -m X`` puts the process's CWD first on
+    ``sys.path`` and verification runs with cwd = the workspace under
+    review, so a workspace file named after the tool shadows the
+    real one and its exit code would decide the check (R3-1).
+
+    Two independent halves, neither trusting the workspace:
+
+    * Shadow DETECTION is _workspace_shadow() above - plain pathlib
+      in this process. It cannot be blinded by a planted stdlib
+      module (round 5, R4-1: the round-4 design asked a probe
+      interpreter started INSIDE the workspace where the module
+      resolves, and a planted ``json.py`` decided what that probe
+      "learned").
+    * The probe supplies the CLEAN origin: a fresh subprocess of
+      the SAME interpreter the command would use, run isolated
+      (``python -I``) so its own import machinery and stdlib are
+      beyond the workspace's reach, resolving X via find_spec
+      without executing it. A probe that cannot answer (interpreter
+      error, timeout, unparseable output) blocks: a tool whose
+      origin cannot be confirmed is not run on faith. An origin
+      landing inside the workspace even under isolation also
+      blocks (defense in depth - e.g. an interpreter whose own
+      installation lives in the workspace).
+    """
+    if module not in _MODULE_TOOLS:
+        return f"unrecognized verification module {module!r}"
+    root = Path(workspace).resolve()
+    shadow = _workspace_shadow(root, module)
+    if shadow is not None:
+        return f"verification tool shadowed by workspace " \
+               f"file {shadow}"
     try:
-        process = await asyncio.create_subprocess_exec(
-            *argv, cwd=str(cwd),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-    except OSError as exc:
-        return 127, f"could not start {' '.join(argv)}: {exc}", False
-    try:
-        out, _ = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
-    except TimeoutError:
-        process.kill()
-        await process.wait()
-        return 124, f"timed out after {timeout_s:g}s", True
-    text = out.decode("utf-8", errors="replace")
-    return process.returncode or 0, text[-4000:], False
+        proc = subprocess.run(
+            [python, "-I", "-c", _PROBE_PROGRAM, module],
+            cwd=root, env=strip_secret_env(None),
+            capture_output=True, text=True, timeout=30)
+        lines = [line for line in proc.stdout.splitlines() if line.strip()]
+        paths = json.loads(lines[-1])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return f"verification tool origin could not be confirmed " \
+               f"for {module}"
+    for raw in paths:
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        candidate = candidate.resolve()
+        if candidate == root or root in candidate.parents:
+            return f"verification tool shadowed by workspace " \
+                   f"file {candidate}"
+    return None
+
+
+async def _run_command(command: str, *, cwd: Path, timeout_s: float,
+                       tool: str, permissions, sandbox_plan,
+                       check_command: str | None = None
+                       ) -> tuple[int, str, bool]:
+    """Run one verification command through the broker + shell path.
+
+    Returns (exit code, output, timed out). When a permission engine
+    is supplied, the command is checked (and the decision audit-
+    logged) and resolved through it first; a command the broker does
+    not ALLOW is never executed - the check simply fails with the
+    recorded reasons. Execution itself is the shell tool's shared
+    ``run_shell``: secret-stripped environment, sandbox wrap when a
+    plan is given.
+
+    The broker classifies ``check_command`` when given - the
+    command's LOGICAL form (``python -m pytest -q .``) - while
+    ``command`` is the normalized argv that actually executes
+    (``/path/to/venv/bin/python -m pytest -q .``). The two are the
+    same command semantically, but the classifier rates any absolute
+    interpreter path "unknown" (review round 3, R2-1): round 2
+    checked the rewritten string, so daemon's own housekeeping
+    commands hit the ASK floor and were denied in every
+    non-interactive run - verification "failed" on correct edits
+    without ever running a test.
+    """
+    if permissions is not None:
+        decision = permissions.check(
+            tool, {"command": check_command or command},
+            mutating=True)
+        decision = permissions.resolve(decision)
+        if decision.effect is not Effect.ALLOW:
+            reasons = "; ".join(decision.reasons) or decision.effect.value
+            return 126, f"verification command not permitted: {reasons}", False
+    from ..tools.shell import run_shell
+
+    return await run_shell(command, cwd=cwd, timeout_s=timeout_s,
+                           sandbox_plan=sandbox_plan)
 
 
 def _last_line(text: str) -> str:
@@ -235,10 +404,26 @@ def _last_line(text: str) -> str:
 async def verify_changes(workspace: Path | str, files_changed: list[str],
                          *, run_tests: bool = True, run_lint: bool = True,
                          run_typecheck: bool = True,
-                         timeout_s: float = 300) -> VerificationResult:
-    """Verify the files a turn changed. Always returns a result; never raises."""
+                         timeout_s: float = 300,
+                         permissions=None, config=None) -> VerificationResult:
+    """Verify the files a turn changed. Always returns a result; never raises.
+
+    ``permissions`` is the run's PermissionEngine: every command is
+    checked + audit-logged through it (V3). ``config`` enables the
+    sandbox wrap via ``sandbox.shell``. Both default to None for
+    direct callers (unit tests), in which case commands still run
+    through ``run_shell`` - the environment is secret-stripped
+    either way.
+    """
     root = Path(workspace).resolve()
     result = VerificationResult()
+    from ..sandbox import plan_for
+
+    sandbox_plan = plan_for(config, root) if config is not None else None
+    # Inside the sandbox the venv interpreter does not exist (it lives
+    # under $HOME, which is not bound); the box's own python3 is the
+    # interpreter there. Outside, use this very interpreter.
+    python = "python3" if sandbox_plan is not None else sys.executable
     py_files = [root / rel for rel in files_changed
                 if rel.endswith(".py") and (root / rel).exists()]
     # Timestamp-based .pyc invalidation uses second-resolution mtimes, so
@@ -255,44 +440,90 @@ async def verify_changes(workspace: Path | str, files_changed: list[str],
                 except OSError:
                     pass
     if py_files:
-        code, out, timed_out = await _run(
-            [sys.executable, "-m", "compileall", "-q",
-             *[str(path) for path in py_files]],
-            cwd=root, timeout_s=min(timeout_s, 120))
-        result.checks.append(VerificationCheck(
-            label=f"compileall ({len(py_files)} file(s))",
-            passed=code == 0 and not timed_out,
-            detail="timed out" if timed_out else (_last_line(out) or "ok")))
+        block = tool_module_block(python, "compileall", root)
+        if block is not None:
+            result.checks.append(VerificationCheck(
+                label=f"compileall ({len(py_files)} file(s))",
+                passed=False, detail=block))
+        else:
+            command = shlex.join(
+                [python, "-m", "compileall", "-q",
+                 *[str(path) for path in py_files]])
+            code, out, timed_out = await _run_command(
+                command, cwd=root, timeout_s=min(timeout_s, 120),
+                tool="run_command", permissions=permissions,
+                sandbox_plan=sandbox_plan,
+                check_command=shlex.join(
+                    ["python", "-m", "compileall", "-q",
+                     *[str(path) for path in py_files]]))
+            result.checks.append(VerificationCheck(
+                label=f"compileall ({len(py_files)} file(s))",
+                passed=code == 0 and not timed_out,
+                detail="timed out" if timed_out else (_last_line(out) or "ok")))
     if run_lint:
         lint_command = detect_lint_command(root, files_changed)
         if lint_command is not None:
-            code, out, timed_out = await _run(
-                _command_argv(lint_command), cwd=root, timeout_s=timeout_s)
-            result.checks.append(VerificationCheck(
-                label=f"lint: {lint_command}",
-                passed=code == 0 and not timed_out,
-                detail="timed out" if timed_out else (_last_line(out) or f"exit {code}")))
+            argv = _command_argv(lint_command)
+            if sandbox_plan is not None and argv[:1] == [sys.executable]:
+                argv = ["python3", *argv[1:]]
+            block = tool_module_block(argv[0], argv[2], root) \
+                if argv[1:2] == ["-m"] and len(argv) > 2 else None
+            if block is not None:
+                result.checks.append(VerificationCheck(
+                    label=f"lint: {lint_command}",
+                    passed=False, detail=block))
+            else:
+                code, out, timed_out = await _run_command(
+                    shlex.join(argv), cwd=root, timeout_s=timeout_s,
+                    tool="run_command", permissions=permissions,
+                    sandbox_plan=sandbox_plan,
+                    check_command=lint_command)
+                result.checks.append(VerificationCheck(
+                    label=f"lint: {lint_command}",
+                    passed=code == 0 and not timed_out,
+                    detail="timed out" if timed_out else (_last_line(out) or f"exit {code}")))
     if run_typecheck:
         typecheck_command = detect_typecheck_command(root, files_changed)
         if typecheck_command is not None:
-            code, out, timed_out = await _run(
-                _command_argv(typecheck_command), cwd=root, timeout_s=timeout_s)
-            result.checks.append(VerificationCheck(
-                label=f"typecheck: {typecheck_command}",
-                passed=code == 0 and not timed_out,
-                detail="timed out" if timed_out else (_last_line(out) or f"exit {code}")))
+            argv = _command_argv(typecheck_command)
+            if sandbox_plan is not None and argv[:1] == [sys.executable]:
+                argv = ["python3", *argv[1:]]
+            block = tool_module_block(argv[0], argv[2], root) \
+                if argv[1:2] == ["-m"] and len(argv) > 2 else None
+            if block is not None:
+                result.checks.append(VerificationCheck(
+                    label=f"typecheck: {typecheck_command}",
+                    passed=False, detail=block))
+            else:
+                code, out, timed_out = await _run_command(
+                    shlex.join(argv), cwd=root, timeout_s=timeout_s,
+                    tool="run_command", permissions=permissions,
+                    sandbox_plan=sandbox_plan,
+                    check_command=typecheck_command)
+                result.checks.append(VerificationCheck(
+                    label=f"typecheck: {typecheck_command}",
+                    passed=code == 0 and not timed_out,
+                    detail="timed out" if timed_out else (_last_line(out) or f"exit {code}")))
     if run_tests:
         command = detect_test_command(root, files_changed)
         if command is not None:
+            detected = command
+            block = None
             if command.startswith("python -m pytest"):
                 # Use this interpreter, not a bare `python` from PATH.
-                argv = [sys.executable, "-m", "pytest"] + command.split()[3:]
+                command = shlex.join(
+                    [python, "-m", "pytest"] + command.split()[3:])
+                block = tool_module_block(python, "pytest", root)
+            if block is not None:
+                result.checks.append(VerificationCheck(
+                    label=command, passed=False, detail=block))
             else:
-                argv = command.split()
-            code, out, timed_out = await _run(
-                argv, cwd=root, timeout_s=timeout_s)
-            result.checks.append(VerificationCheck(
-                label=command,
-                passed=code == 0 and not timed_out,
-                detail="timed out" if timed_out else (_last_line(out) or f"exit {code}")))
+                code, out, timed_out = await _run_command(
+                    command, cwd=root, timeout_s=timeout_s,
+                    tool="run_tests", permissions=permissions,
+                    sandbox_plan=sandbox_plan, check_command=detected)
+                result.checks.append(VerificationCheck(
+                    label=command,
+                    passed=code == 0 and not timed_out,
+                    detail="timed out" if timed_out else (_last_line(out) or f"exit {code}")))
     return result

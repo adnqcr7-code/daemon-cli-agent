@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ..config import Config
 from ..errors import DaemonError
-from ..log import audit, get_logger
+from ..log import audit, audit_status, get_logger
 from ..models import RemoteModel
 from ..permissions import PermissionEngine
 from ..providers.types import Usage
@@ -96,7 +96,12 @@ class Orchestrator:
         session = Session(meta=SessionMeta(
             workspace=str(self.workspace), provider=model.provider,
             model=model.model_id, role=spec.role,
-            title=f"[{role['name']}] {spec.brief[:60]}"))
+            title=f"[{role['name']}] {spec.brief[:60]}",
+            # Record the REAL audit status (review round 2, V9):
+            # round 1 left the default in place, so subagent metas
+            # asserted audit_ok unconditionally - even when the
+            # audit log had failed to open.
+            audit_ok=audit_status()[0]))
         runtime = AgentRuntime(
             adapter=adapter, model=model, registry=registry,
             permissions=permissions, session=session, ui=ui,

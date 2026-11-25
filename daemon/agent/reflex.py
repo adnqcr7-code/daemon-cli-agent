@@ -40,6 +40,7 @@ index loaded at session start.
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import hashlib
 import json
@@ -289,10 +290,17 @@ class ReflexStore:
     cannot lose each other's updates.
     """
 
-    def __init__(self, workspace: Path | None = None) -> None:
+    def __init__(self, workspace: Path | None = None,
+                 env_dir: Path | None = None) -> None:
         self.workspace = Path(workspace) if workspace else None
-        self.path = (project_dir(self.workspace) / "reflex.json"
-                     if self.workspace else None)
+        if env_dir is not None:
+            # Env-scoped (§2.4): the reflex store lives under the
+            # env's state dir, so certified facts from env A can
+            # never fire in env B.
+            self.path = Path(env_dir) / "state" / "reflex.json"
+        else:
+            self.path = (project_dir(self.workspace) / "reflex.json"
+                         if self.workspace else None)
         self._entries: dict[str, ReflexEntry] = {}
         self._index: dict[str, set[str]] = {}
         self.load()
@@ -817,7 +825,8 @@ class ReflexEngine:
     # ------------------------------------------------------------ recording
 
     def record_tool_result(self, tool_name: str, args: dict, content: str,
-                           *, is_error: bool = False) -> None:
+                           *, is_error: bool = False,
+                           metadata: dict | None = None) -> None:
         """Observe one executed tool call: overrides, rot, capture."""
         if not self.enabled or self._broken:
             return
@@ -830,7 +839,7 @@ class ReflexEngine:
             if tool_name in _MUTATING_FILE_TOOLS:
                 self._quarantine_bound_to(args)
             if tool_name in EXECUTION_TOOLS:
-                self._capture_execution(tool_name, args, content)
+                self._capture_execution(tool_name, args, content, metadata)
         except Exception as exc:  # noqa: BLE001 - silence on error, by design
             _logger.debug("reflex record failed: %s", exc)
             self._broken = True
@@ -894,11 +903,33 @@ class ReflexEngine:
     # ----------------------------------------------------------- capturing
 
     def _capture_execution(self, tool_name: str, args: dict,
-                           content: str) -> None:
-        """A codeintel result that *is* the fact certifies a claim."""
-        parsed = _parse_symbol_output(content, tool_name, self.workspace)
-        if parsed is None:
-            return
+                           content: str,
+                           metadata: dict | None = None) -> None:
+        """A codeintel result that *is* the fact certifies a claim.
+
+        Phase 2 (v0.5.0): certification requires STRUCTURED rows from
+        ``ToolOutput.metadata``. When the tool supplied the structured
+        key, only metadata rows are used - the text is never parsed
+        for certification, so a newline inside a filename stays inside
+        one row's path field and cannot mint an extra row (this
+        retires the review-5 R5-1 residue for the flagship class).
+        When the tool supplied no metadata at all, the Phase 1 text
+        parsers still run, but their rows may only PROPOSE - they can
+        no longer certify symbols/references.
+        """
+        if _metadata_key(tool_name, metadata) is not None:
+            parsed = _parse_metadata_output(
+                tool_name, metadata, self.workspace,
+                queried=args.get("symbol"))
+            if parsed is None:
+                return
+            executed = True
+        else:
+            parsed = _parse_symbol_output(content, tool_name,
+                                           self.workspace)
+            if parsed is None:
+                return
+            executed = False
         files, symbols, result = parsed
         if tool_name == "references":
             # Both references output shapes name the queried symbol
@@ -928,7 +959,7 @@ class ReflexEngine:
         self.submit_claim(
             f"tool:{tool_name}", pattern, result,
             derivation=f"{tool_name}({summary})",
-            executed=True, inputs=inputs)
+            executed=executed, inputs=inputs)
 
     def submit_claim(self, source: str, pattern: dict, result: str,
                      derivation: str = "", *, executed: bool = False,
@@ -1129,8 +1160,10 @@ def _parse_reference_counts(
     An attacker who balances the books exactly, replacing a dropped
     fragment's count with a fabricated one for a real file, remains
     parser-indistinguishable from a genuine run over a different
-    repo; that residue is inherent to parsing line-shaped output
-    and is retired only by structured tool metadata - Phase 2.)
+    repo; that residue is inherent to parsing line-shaped output.
+    Since Phase 2 (v0.5.0) this parser feeds proposals only -
+    certification requires the structured ``reference_counts``
+    metadata rows (``_parse_metadata_output``).
     """
     header: str | None = None
     symbol = ""
@@ -1209,8 +1242,11 @@ def _parse_symbol_output(content: str, tool_name: str,
         # real file with a prose tail fails the kind slot - and the
         # existence check alone stops ghost paths; a fragment that
         # satisfies both is indistinguishable from a genuine symbol
-        # row, which is the accepted residue of parsing text output
-        # (structured tool metadata retires it - Phase 2).
+        # row, which was the accepted residue of parsing text output.
+        # Phase 2 (v0.5.0): this parser's rows may only propose;
+        # certification requires structured metadata rows
+        # (_parse_metadata_output), where a filename newline stays
+        # inside one row's path field and mints nothing.
         match = _SYMBOL_LINE.match(line)
         if match is not None:
             canonical = _canonical_rel_in_workspace(
@@ -1254,3 +1290,282 @@ def _parse_symbol_output(content: str, tool_name: str,
     if not lines:
         return None
     return files, symbols, "\n".join(lines[:20])
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: structured metadata capture (v0.5.0, design v4 section 3.3 gate)
+#
+# Certification of codeintel facts consumes ToolOutput.metadata rows,
+# never re-parsed text, whenever the tool supplied them. Structured
+# does NOT mean trusted: the rows still come from tool output, so
+# every row passes the same discipline as the text parsers - the path
+# must name a real file inside the workspace (existence + containment,
+# canonical spelling), the name must be identifier-shaped, the kind
+# must be in the producers' vocabulary, the line a positive int. One
+# extra rule is structural: a canonical path containing control
+# characters (a newline-bearing filename) is dropped whole - in text
+# its row was destroyed by line splitting; here the row survives as
+# data, but its path may never enter a stored result line, where the
+# newline would split one measured fact into two apparent ones.
+# ---------------------------------------------------------------------------
+
+_NAME_SHAPE = re.compile(r"^\w+(?:\.\w+)*$")
+# Any control character at all, newline and tab included. (The
+# module-level _CONTROL deliberately exempts \t and \n because it
+# sanitizes multi-line result text; a path or header token is a
+# single-line context, where both are structural attacks.)
+_ANY_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _metadata_key(tool_name: str, metadata: dict | None) -> str | None:
+    """The structured-capture key a tool supplied, or None.
+
+    None means "the tool offered no structured rows" - the caller
+    falls back to the text parsers, whose rows may only propose.
+    A present-but-empty key still counts as supplied: the tool spoke
+    structure and reported no rows, so there is no fact to capture.
+    """
+    if not isinstance(metadata, dict):
+        return None
+    if tool_name == "find_symbols":
+        return "symbols" if "symbols" in metadata else None
+    if tool_name == "references":
+        if "references" in metadata:
+            return "references"
+        if "reference_counts" in metadata:
+            return "reference_counts"
+    return None
+
+
+def _clean_canonical(workspace: Path | None, raw: object) -> str | None:
+    """Canonical in-workspace spelling of a metadata row's path.
+
+    Existence + containment via _canonical_rel_in_workspace (the same
+    check the text parsers use), plus the structural control-char
+    rule described above.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    canonical = _canonical_rel_in_workspace(workspace, raw)
+    if canonical is None or _ANY_CONTROL.search(canonical):
+        return None
+    return canonical
+
+
+def _file_line_count(workspace: Path | None, canonical: str,
+                     cache: dict[str, int | None]) -> int | None:
+    """Line count of the bound file (cached per parse), or None."""
+    if canonical not in cache:
+        count = None
+        if workspace is not None:
+            try:
+                text = (workspace / canonical).read_text(
+                    encoding="utf-8", errors="replace")
+                count = len(text.splitlines())
+            except OSError:
+                count = None
+        cache[canonical] = count
+    return cache[canonical]
+
+
+def _row_line(row: dict, workspace: Path | None = None,
+              canonical: str | None = None,
+              cache: dict[str, int | None] | None = None) -> int | None:
+    line = row.get("line")
+    if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+        return None
+    if workspace is not None and canonical is not None:
+        # Bounds check (review round 2, V8): the line must exist in
+        # the actual file. Round 1 required only a positive int, so
+        # line=99999 certified against a 2-line file - shape-valid,
+        # truth-unverified, the same class as the V4 count forgery.
+        total = _file_line_count(workspace, canonical,
+                                 cache if cache is not None else {})
+        if total is None or line > total:
+            return None
+    return line
+
+
+def _count_occurrences(workspace: Path | None, canonical: str,
+                       name: str) -> int | None:
+    """Occurrences of *name* in the bound file, counted exactly the
+    way the ReferencesTool fallback producer counts them (AST
+    Name/Attribute nodes for Python files, word-boundary matches
+    otherwise), or None when the file cannot be read.
+
+    This is the verification half of review round 2, V4: a metadata
+    reference count is a CLAIM; the file's actual contents are the
+    evidence, and the claim certifies only when they agree exactly.
+    """
+    if workspace is None:
+        return None
+    path = workspace / canonical
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if path.suffix == ".py":
+        try:
+            return sum(
+                1 for node in ast.walk(ast.parse(text))
+                if isinstance(node, ast.Name) and node.id == name
+                or isinstance(node, ast.Attribute) and node.attr == name)
+        except SyntaxError:
+            pass  # producer falls back to lexical counting too
+    return len(re.compile(rf"\b{re.escape(name)}\b").findall(text))
+
+
+def _parse_metadata_output(tool_name: str, metadata: dict | None,
+                           workspace: Path | None,
+                           queried: object = None
+                           ) -> tuple[list[str], list[str], str] | None:
+    """(files, symbols, result) from structured rows, or None.
+
+    The stored result is rebuilt from the validated rows in the same
+    line shapes the text parsers store, capped at 20 lines with the
+    binding capped with it (review finding 6).
+    """
+    key = _metadata_key(tool_name, metadata)
+    if key is None or not isinstance(metadata, dict):
+        return None
+    rows = metadata.get(key)
+    if not isinstance(rows, list) or not rows:
+        return None
+    if key == "symbols":
+        return _metadata_symbol_rows(rows, workspace)
+    if key == "references":
+        return _metadata_reference_rows(rows, workspace)
+    return _metadata_count_rows(rows, workspace, queried)
+
+
+def _metadata_symbol_rows(rows: list, workspace: Path | None
+                          ) -> tuple[list[str], list[str], str] | None:
+    lines: list[str] = []
+    files: list[str] = []
+    symbols: list[str] = []
+    line_cache: dict[str, int | None] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        canonical = _clean_canonical(workspace, row.get("path"))
+        name = row.get("name")
+        kind = row.get("kind")
+        line = _row_line(row, workspace, canonical, line_cache)
+        if canonical is None or line is None:
+            continue
+        if not isinstance(name, str) or not _NAME_SHAPE.match(name):
+            continue
+        if kind not in _SYMBOL_KINDS:
+            continue
+        symbol = name.split(".")[0]
+        if symbol not in symbols:
+            symbols.append(symbol)
+        if canonical not in files:
+            files.append(canonical)
+        lines.append(f"{canonical}:{line} {kind} {name}")
+        if len(lines) >= 20:
+            break
+    if not lines:
+        return None
+    return files, symbols, "\n".join(lines)
+
+
+def _metadata_reference_rows(rows: list, workspace: Path | None
+                             ) -> tuple[list[str], list[str], str] | None:
+    lines: list[str] = []
+    files: list[str] = []
+    line_cache: dict[str, int | None] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        canonical = _clean_canonical(workspace, row.get("path"))
+        line = _row_line(row, workspace, canonical, line_cache)
+        if canonical is None or line is None:
+            continue
+        if canonical not in files:
+            files.append(canonical)
+        lines.append(f"{canonical}:{line}")
+        if len(lines) >= 20:
+            break
+    if not lines:
+        return None
+    return files, [], "\n".join(lines)
+
+
+def _metadata_count_rows(rows: list, workspace: Path | None,
+                         queried: object
+                         ) -> tuple[list[str], list[str], str] | None:
+    # Counts certify ONLY when verified (review round 2, V4): every
+    # row's count is recomputed from the file's actual contents at
+    # capture, with the producer's own counting method, and the row
+    # is kept only when the two agree exactly. Round 1 validated
+    # shape alone (existing path, positive int) and SUMMED duplicate
+    # rows, so a forged count=999999 on a file with zero references -
+    # or the same honest row delivered twice - minted a false
+    # certified fact. Rows are deduplicated by (path, name): a
+    # repeated row is the same fact and counts once. Verification is
+    # per-name, and so is the sum (round 3, R2-2): only rows naming
+    # the certified symbol are summed into its header.
+    verified: dict[tuple[str, str], int] = {}
+    names: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        canonical = _clean_canonical(workspace, row.get("path"))
+        count = row.get("count")
+        name = row.get("name")
+        if canonical is None or isinstance(count, bool) \
+                or not isinstance(count, int) or count < 1:
+            continue
+        if not isinstance(name, str) or not name:
+            continue
+        key = (canonical, name)
+        if key in verified:
+            continue  # duplicate row: counts once, never summed
+        if _count_occurrences(workspace, canonical, name) != count:
+            continue  # unverified (forged or stale): cannot certify
+        verified[key] = count
+        if name not in names:
+            names.append(name)
+    if not verified:
+        return None
+    # The header certifies a count for ONE symbol (review round 3,
+    # R2-2): the queried one. Round 2 verified each row against its
+    # OWN name but then summed every name's counts into the queried
+    # symbol's header, so individually true rows for 'remove'
+    # certified a false total for 'add' (2 + 50 = 52). Only rows
+    # whose name IS the certified symbol feed its counts; rows for
+    # other names contribute nothing, and a result set with no
+    # verified row for the symbol certifies no count for it at all.
+    symbol = _header_symbol(queried, names)
+    if symbol is None:
+        return None
+    kept: dict[str, int] = {}
+    for (canonical, name), count in verified.items():
+        if name == symbol:
+            kept[canonical] = kept.get(canonical, 0) + count
+    if not kept:
+        return None
+    # The header is rebuilt from the validated rows (never copied
+    # from tool text), so its books balance by construction: total is
+    # the sum of the kept counts, file count is the kept file count.
+    total = sum(kept.values())
+    header = (f"'{symbol}': {total} reference(s) in "
+              f"{len(kept)} file(s)")
+    body_items = sorted(kept.items())[:19]
+    files = [path for path, _count in body_items]
+    body = [f"{path}: {count}" for path, count in body_items]
+    return files, [symbol], "\n".join([header, *body])
+
+
+def _header_symbol(queried: object, names: list[str]) -> str | None:
+    """A symbol safe to embed in the rebuilt references header: a
+    single quote-free, control-free token (the header wraps it in
+    single quotes on one line)."""
+    for candidate in [queried, *names]:
+        if isinstance(candidate, str) and candidate \
+                and "'" not in candidate \
+                and not _ANY_CONTROL.search(candidate) \
+                and " " not in candidate:
+            return candidate
+    return None
