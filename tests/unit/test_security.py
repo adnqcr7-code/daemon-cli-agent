@@ -212,3 +212,135 @@ def test_strip_secret_env():
     assert "PATH" in cleaned and "HOME" in cleaned
     for name in KNOWN_SECRET_ENV_VARS:
         assert name not in cleaned
+
+
+def test_strip_secret_env_pattern_rules():
+    # Review round 2, V10: the exact-name list alone passed any
+    # custom-named credential. Names with a KEY / TOKEN / SECRET /
+    # PASSWORD / PASSWD / CREDENTIAL / AUTH / OAUTH segment (any
+    # case) are stripped too; ordinary variables survive. (Round 3
+    # made the matching segment-based - see the R2-7 test below -
+    # but every name pinned here must still strip.)
+    env = {
+        "MY_CUSTOM_DEPLOY_TOKEN": "leak",
+        "deploy_secret": "leak",
+        "SERVICE_PASSWORD": "leak",
+        "db_passwd": "leak",
+        "APP_CREDENTIAL_FILE": "leak",
+        "OAUTH_CLIENT": "leak",
+        "SOME_API_KEY": "leak",
+        "PATH": "/usr/bin",
+        "EDITOR": "vi",
+        "LANG": "en_US.UTF-8",
+    }
+    cleaned = strip_secret_env(env)
+    for name in env:
+        if name in ("PATH", "EDITOR", "LANG"):
+            assert name in cleaned
+        else:
+            assert name not in cleaned, name
+
+
+def test_strip_secret_env_segment_rules_and_preserve_list():
+    # Review round 3, R2-7: round 2's SUBSTRING fragments leaked in
+    # both directions. Segment matching must now strip the short
+    # credential segments it missed, and the preserve list must keep
+    # identity/agent plumbing whose segments happen to match.
+    must_strip = {
+        "DB_PASS": "leak",        # PASS segment (round 2 missed it)
+        "APP_PWD": "leak",        # PWD segment
+        "MY_BEARER": "leak",      # BEARER segment
+        "SESSION_COOKIE": "leak",  # COOKIE segment
+        "MY.API.TOKEN": "leak",   # dotted segments split too
+        "TOKEN2": "leak",         # trailing digits ignored
+    }
+    must_keep = {
+        # AUTH segment, but a socket path, not a secret - stripping
+        # it silently broke git-over-SSH in the shell tool.
+        "SSH_AUTH_SOCK": "/run/user/1000/ssh-agent.socket",
+        # Commit attribution plumbing, not credentials.
+        "GIT_AUTHOR_NAME": "Ada",
+        "GIT_AUTHOR_EMAIL": "ada@example.com",
+        "GIT_COMMITTER_NAME": "Ada",
+        "GIT_COMMITTER_EMAIL": "ada@example.com",
+        # Substring casualties of round 2, innocent under segments:
+        "MONKEY": "banana",           # contains KEY, no KEY segment
+        "KEYBOARD_LAYOUT": "us",      # KEYBOARD is not KEY
+        "AUTHOR": "Ada",              # AUTHOR is not AUTH
+        "PATH": "/usr/bin",
+    }
+    cleaned = strip_secret_env({**must_strip, **must_keep})
+    for name in must_strip:
+        assert name not in cleaned, name
+    for name in must_keep:
+        assert cleaned[name] == must_keep[name], name
+
+
+def test_strip_secret_env_fused_forms_closed():
+    # Review round 5, R4-2 (the R3-2 remainder): the fused set
+    # enumerated spellings, so fused near-misses slipped both the
+    # segment rules and the fused check - JWTSECRET (fused twin of
+    # JWT_SECRET), SECRETKEY2 (fused check never stripped trailing
+    # digits), APPSECRET (fused twin of APP_SECRET). The name is
+    # now digit-normalized, then stripped when it starts with JWT
+    # or ends with SECRET / PASSPHRASE / TOKEN / PASSWORD.
+    must_strip = {
+        "JWTSECRET": "leak",
+        "SECRETKEY2": "leak",
+        "APPSECRET": "leak",
+    }
+    must_keep = {
+        # Pinned survivors: none starts with JWT, none ends with a
+        # listed credential word (SECRETKEYS ends in KEYS,
+        # MY_SECRETKEY ends in KEY), and the preserve list still
+        # beats every strip rule.
+        "MONKEY": "banana",
+        "KEYBOARD_LAYOUT": "us",
+        "SECRETKEYS": "a list is not a key",
+        "MY_SECRETKEY": "has separators - not the fused form",
+        "GIT_AUTHOR_NAME": "Ada",
+        "GIT_AUTHOR_EMAIL": "ada@example.com",
+        "GIT_COMMITTER_NAME": "Ada",
+        "GIT_COMMITTER_EMAIL": "ada@example.com",
+        "SSH_AUTH_SOCK": "/run/user/1000/ssh-agent.socket",
+        "PATH": "/usr/bin",
+    }
+    cleaned = strip_secret_env({**must_strip, **must_keep})
+    for name in must_strip:
+        assert name not in cleaned, name
+    for name in must_keep:
+        assert cleaned[name] == must_keep[name], name
+
+
+def test_strip_secret_env_passphrase_jwt_and_fused_names():
+    # Review round 4, R3-2 (the R2-7 remainder): the segment
+    # vocabulary still missed PASSPHRASE and JWT, and segment
+    # matching cannot see fused forms - SECRETKEY is one segment.
+    # All of these reached every child process (shell tool,
+    # verification, sandboxed shells).
+    must_strip = {
+        "PASSPHRASE": "leak",
+        "MY_PASSPHRASE": "leak",
+        "GPG_PASSPHRASE": "leak",
+        "JWT": "leak",
+        "APP_JWT": "leak",
+        "SECRETKEY": "leak",      # fused: full-name match only
+        "PRIVATEKEY": "leak",
+        "ACCESSKEY": "leak",
+        "secretkey": "leak",      # case-insensitive like the rest
+    }
+    must_keep = {
+        # The fused set is full-name only: lookalikes that merely
+        # CONTAIN a fused form, or extend it, are not credentials
+        # by name and must survive (both directions pinned).
+        "MONKEY": "banana",
+        "KEYBOARD_LAYOUT": "us",
+        "SECRETKEYS": "a list is not a key",
+        "MY_SECRETKEY": "has separators - not the fused form",
+        "PATH": "/usr/bin",
+    }
+    cleaned = strip_secret_env({**must_strip, **must_keep})
+    for name in must_strip:
+        assert name not in cleaned, name
+    for name in must_keep:
+        assert cleaned[name] == must_keep[name], name
