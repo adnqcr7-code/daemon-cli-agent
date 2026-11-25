@@ -1,0 +1,50 @@
+name: Daemon desktop builds
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "desktop-v*"
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm install
+      - name: Build Windows installer
+        working-directory: desktop
+        run: npm run build:windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daemon-windows-installer
+          path: desktop/src-tauri/target/release/bundle/nsis/*.exe
+
+  arch-compatible-appimage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev patchelf libwebkit2gtk-4.1-dev
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm install
+      - name: Build AppImage
+        working-directory: desktop
+        run: npm run build:linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daemon-linux-appimage
+          path: desktop/src-tauri/target/release/bundle/appimage/*.AppImage
