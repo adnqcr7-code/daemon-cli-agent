@@ -91,5 +91,16 @@ Install `pip install 'daemon-agent[repl]'`.
 - `~/.daemon/logs/audit.log` — permission decisions, tool executions,
   credential events (secret-free).
 
+## Undo
+
+`daemon undo` reverts the last checkpoint; `daemon undo --list` shows
+undoable checkpoints; `daemon undo <checkpoint_id>` jumps to a specific
+one. Undo resolves through the event log: the `checkpoint.created`
+events are the index, and the snapshots under `.daemon/checkpoints/`
+are the byte storage — a snapshot with no event cannot be undone
+through this command. Restoring does not create a new checkpoint, so
+there is no undo-of-undo: to go further back, run
+`daemon undo <earlier-id>`.
+
 Still stuck? Open an issue with the output of `daemon doctor` (secrets are
 never included).

@@ -70,6 +70,15 @@ Rules support `tool` (glob), `command` (regex on the command text) and
 `path` (glob) matchers. User rules may relax *ask* floors (your machine,
 your call) but never the *deny* floor.
 
+An `allow` rule may carry `ttl_minutes`, making it an expiring grant
+instead of a permanent rule. The window opens when the grant is first
+seen and is **persisted** in `grant_state.json` under the daemon home
+(keyed by the rule's identity), so it survives restarts: restarting
+the CLI does not restart the window, and once it closes the rule stops
+matching and resolution falls back (to *ask* for ask-by-default tools).
+`ttl_minutes <= 0` is expired from the start. TTL on non-`allow` rules
+is ignored - policy is not a grant.
+
 ## Checkpoints and undo
 
 Every mutating tool (write, edit, patch, delete, move, format) snapshots the
@@ -88,6 +97,40 @@ All filesystem tool paths resolve inside the trusted workspace:
 - `..` traversal, absolute outside paths and **symlink escapes** are
   rejected (resolution happens before the containment check).
 - Outside access requires an explicit permission rule.
+
+## Shell sandbox (opt-in)
+
+With `sandbox.shell = true`, shell commands run inside bubblewrap: a
+fresh tmpfs root with only an enumerated runtime surface bound in
+(`/usr` plus the merged-usr links, a minimal `/etc`, `/proc`, `/dev`,
+a private `/tmp`) and the workspace bound read-write at its real
+path. Host paths outside the workspace - `$HOME`, `/var`, sibling
+trees - do not exist inside the box, so they can be neither read nor
+written. A network namespace is added when the host allows it; where
+it does not, the status says so plainly and commands can still reach
+the network. Availability is probed by really running bwrap, never
+assumed, and doctor reports the same level the probe found.
+
+Known limitations, inherent to the mechanism:
+
+- **Hardlinks to outside files are refused.** A hardlink planted
+  inside the workspace names the same inode as a file outside it,
+  and a bind mount cannot tell the link from its target — so the
+  sandbox setup scans for files whose link count exceeds the
+  number of in-tree links (`find_outside_hardlinks`) and refuses
+  to start the sandbox at all: `plan_for` raises instead of
+  returning an unsandboxed fallback, and both backends re-check
+  at run time, so a link planted after setup is still caught.
+  Planting one requires a host-side act first (for example,
+  extracting a crafted tarball with a hardlink entry into the
+  workspace) - the sandbox itself cannot create the link - but
+  once planted, the run is refused rather than the outside file
+  being read. The selftest sandbox leg probes exactly this.
+- **`/proc` describes the host.** The pid namespace hides other
+  processes, but host-global kernel files (`/proc/cmdline`,
+  `/proc/cpuinfo`, `/proc/iomem`, ...) still expose the host's boot
+  parameters and hardware details. Bubblewrap cannot fake their
+  contents.
 
 ## Prompt-injection defence
 
