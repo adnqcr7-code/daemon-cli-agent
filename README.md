@@ -62,12 +62,12 @@ exact command to use; you do not need to edit TOML by hand.
 > trusted-publisher setup is the last step. Until it lands, install the
 > wheel attached to the GitHub Release.
 
-With Python 3.11 or newer, install the v0.9.0 wheel from
-[GitHub Releases](https://github.com/adnqcr7-code/daemon-cli-agent/releases/tag/v0.9.0):
+With Python 3.11 or newer, install the v1.0.0 wheel from
+[GitHub Releases](https://github.com/adnqcr7-code/daemon-cli-agent/releases/tag/v1.0.0):
 
 ```bash
-pipx install "https://github.com/adnqcr7-code/daemon-cli-agent/releases/download/v0.9.0/daemon_agent-0.9.0-py3-none-any.whl"
-# or: python -m pip install "https://github.com/adnqcr7-code/daemon-cli-agent/releases/download/v0.9.0/daemon_agent-0.9.0-py3-none-any.whl"
+pipx install "https://github.com/adnqcr7-code/daemon-cli-agent/releases/download/v1.0.0/daemon_agent-1.0.0-py3-none-any.whl"
+# or: python -m pip install "https://github.com/adnqcr7-code/daemon-cli-agent/releases/download/v1.0.0/daemon_agent-1.0.0-py3-none-any.whl"
 
 daemon auth add
 cd /path/to/your-project
@@ -405,3 +405,7 @@ file content and an optional verification command.
 
 MIT — see [LICENSE](LICENSE). Third-party components: see
 [docs/third-party.md](docs/third-party.md).
+
+## Desktop application (Tauri, Arch Linux)
+
+The repository now includes a native desktop companion in [`desktop/`](desktop/), built with a Rust/Tauri shell around the existing Python agent. See [`DESKTOP-ARCH.md`](DESKTOP-ARCH.md) for the Arch Linux setup and security boundaries. The desktop UI does not replace the CLI or duplicate its credentials and permissions.

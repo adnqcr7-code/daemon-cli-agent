@@ -1,0 +1,17 @@
+# Desktop build artefacts
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+
+# Python environments and caches
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+
+# Local secrets and runtime state
+.env
+.env.*
+.daemon/

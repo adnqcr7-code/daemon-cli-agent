@@ -5,6 +5,15 @@ The format follows Keep a Changelog; versioning is semantic.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-25
+
+Version 1.0: the full app. The 0.9.0 testable CLI (event kernel,
+selftest, front door, plan mode, environments, diffs/undo,
+container-first sandbox) plus the Daemon Desktop shell — Agent Studio
+(custom specialists), Tool Registry (built-in tools and MCP servers),
+and Windows NSIS / Arch AppImage build paths. One version everywhere:
+CLI, desktop frontend, and Tauri shell are all 1.0.0.
+
 ## [0.4.1] - 2026-11-24
 
 Windows fixes. CI for 0.4.0 was green on Linux and macOS but failed
