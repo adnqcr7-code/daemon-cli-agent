@@ -101,13 +101,21 @@ def test_research_agent_cannot_invoke_write_tools(mock_openai, workspace,
     async def go():
         return await agent.ask("write pwned.txt")
 
-    asyncio.run(go())
+    result = asyncio.run(go())
     asyncio.run(adapter.close())
     assert not (workspace / "pwned.txt").exists()
+    # Repair ladder (Phase 3): the write tool is not in this agent's
+    # registry, so it never executes. The model is told via a repair
+    # prompt (not a tool-error result) and answers in text.
+    assert result.tool_calls == 0
     session = agent.session
-    tool_message = next(m for m in session.messages if m.tool_results)
-    assert tool_message.tool_results[0].is_error
-    assert "Unknown tool" in tool_message.tool_results[0].content
+    repair_prompts = [m for m in session.messages
+                      if m.role == "user" and m.text
+                      and m.text.startswith(
+                          "Your last tool call could not be used")]
+    assert len(repair_prompts) == 1
+    assert "write_file" in repair_prompts[0].text
+    assert not any(m.tool_results for m in session.messages)
 
 
 def test_research_system_prompt_is_distinct(workspace):

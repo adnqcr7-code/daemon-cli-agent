@@ -79,7 +79,10 @@ def _seed_certified_fact(workspace) -> None:
     engine = ReflexEngine(Config.load(workspace), workspace=workspace)
     engine.record_tool_result(
         "find_symbols", {"path": "bug.py"},
-        "bug.py:1 function add(a, b)\n[analysis: ast]", is_error=False)
+        "bug.py:1 function add(a, b)\n[analysis: ast]", is_error=False,
+        metadata={"method": "ast", "symbols": [
+            {"name": "add", "kind": "function", "path": "bug.py",
+             "line": 1}]})
     entries = engine.store.entries(status="certified")
     assert len(entries) == 1
 
@@ -104,7 +107,10 @@ def test_reflex_note_fires_once_at_tail(workspace):
     # built after the agent's find_symbols call entered the trajectory.
     assert adapter.requests[request_index].messages[-1] is note_message
     assert request_index == 1
-    assert "add(a, b)" in note_message.text
+    # Phase 2: the certified fact comes from structured metadata rows
+    # ({name, kind, path, line} - no signature), so the note carries
+    # the row shape "bug.py:1 function add".
+    assert "bug.py:1 function add" in note_message.text
     # The system prompt is byte-identical on every request, firing or
     # not - the prompt-cache invariant.
     systems = {request.system for request in adapter.requests}

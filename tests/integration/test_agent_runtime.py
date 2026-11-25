@@ -176,7 +176,13 @@ def test_model_can_compact_context_with_tool(mock_openai, workspace):
         tool["function"]["name"]
         for tool in mock_openai.requests[0]["tools"]
     ]
-    assert "Context estimate:" in mock_openai.requests[0]["messages"][0]["content"]
+    # Cache discipline (Phase 3): the per-turn context estimate is a
+    # tail message on the request copy, NOT part of the system prompt
+    # — the cached prefix stays byte-stable across turns.
+    first = mock_openai.requests[0]["messages"]
+    assert "Context estimate:" not in first[0]["content"]
+    assert any("Context estimate:" in (message.get("content") or "")
+               for message in first[1:])
 
 
 def test_hard_floor_blocks_dangerous_commands_even_when_approved(
@@ -279,11 +285,23 @@ def test_unknown_tool_reports_cleanly(mock_openai, workspace):
     async def go():
         return await runtime.run("try the tool")
 
-    asyncio.run(go())
+    result = asyncio.run(go())
     asyncio.run(adapter.close())
-    tool_message = next(m for m in session.messages if m.tool_results)
-    assert tool_message.tool_results[0].is_error
-    assert "Unknown tool" in tool_message.tool_results[0].content
+    # Repair ladder (Phase 3): an unknown tool never executes. The
+    # model is told via a repair prompt (not a tool-error result);
+    # this mock re-emits the bad call on the retry (its stages advance
+    # on tool messages, and none is ever produced), so the ladder
+    # ends in the plan-only fallback with zero tool executions.
+    assert result.tool_calls == 0
+    assert "Plan only" in result.text
+    assert "does_not_exist" in result.text
+    repair_prompts = [m for m in session.messages
+                      if m.role == "user" and m.text
+                      and m.text.startswith(
+                          "Your last tool call could not be used")]
+    assert len(repair_prompts) == 1
+    assert "does_not_exist" in repair_prompts[0].text
+    assert not any(m.tool_results for m in session.messages)
 
 
 def test_system_prompt_contains_project_context(mock_openai, workspace):
